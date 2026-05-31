@@ -128,6 +128,24 @@ function stepAgent(agent: Agent) {
   }
 }
 
+const MOCK_ACTS = ['request', 'inform', 'propose', 'query', 'agree'] as const;
+
+/** Occasionally fire a synthetic agent-to-agent message so the office floor's
+ *  envelope-handoff animation is visible in demo mode (no live hive routing
+ *  happens without real `claude` agents). The scene listens for this event and
+ *  flies an envelope between the two avatars; see OfficeFloor's demo path. */
+function maybeFlyMessage(mockIds: string[]): void {
+  if (mockIds.length < 2 || Math.random() >= 0.45) return;
+  const from = mockIds[Math.floor(Math.random() * mockIds.length)];
+  let to = from;
+  for (let i = 0; i < 6 && to === from; i++) {
+    to = mockIds[Math.floor(Math.random() * mockIds.length)];
+  }
+  if (to === from) return;
+  const act = MOCK_ACTS[Math.floor(Math.random() * MOCK_ACTS.length)];
+  window.dispatchEvent(new CustomEvent('cth:demo-handoff', { detail: { from, to, act } }));
+}
+
 let interval: number | null = null;
 
 export function startMockLoop() {
@@ -151,6 +169,8 @@ export function startMockLoop() {
         });
       }
     }
+
+    maybeFlyMessage(a2.filter((a) => !a.ptyId).map((a) => a.id));
   }, TICK_MS) as unknown as number;
 }
 

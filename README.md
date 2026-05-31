@@ -47,7 +47,7 @@ Each agent you spawn becomes a Sims-style avatar living on a shared 2D office fl
 
 - Not a replacement for the `claude` CLI — the CLI is the runtime, this app is the viewer/controller.
 - Not a remote dashboard — local sessions only, no auth, no network surface.
-- Not an agent-to-agent message bus — avatars don't hand work off to each other yet.
+- Not an agent-to-agent task scheduler — agents message each other (and you *see* an envelope fly desk-to-desk when they do), but the floor doesn't reassign or load-balance work between them yet.
 
 ---
 
@@ -57,6 +57,7 @@ Each agent you spawn becomes a Sims-style avatar living on a shared 2D office fl
 |---|---|
 | **Real terminals** | Spawn any command (default: `claude`) in a `node-pty` PTY. Full read/write/resize/kill, live data + exit streaming over IPC, multi-agent. |
 | **Office floor** | Pixi.js scene rendering a Tiled office map, camera, recolored character cast, pathfinding, seat assignment, and tool-bubble overlays. |
+| **Message handoffs** | When the hive routes a message, an envelope flies from the sender's desk to each recipient (tinted by speech-act; escalations fly to the door) and pops an arrival sparkle — the multi-agent collaboration made visible. |
 | **Agent panel** | Per-agent detail panel with terminal view, command bar, and a fullscreen terminal mode. |
 | **File browser** | Sandboxed `listDir` / `readFile` / `writeFile` rooted at each agent's cwd, with a file tree and a syntax-highlighting CodeMirror editor (JS/TS, HTML, CSS, JSON, Markdown, Python, YAML). |
 | **Git tab** | Branch, working-tree status, commit log, branch list, ahead/behind, and a rendered commit graph. |

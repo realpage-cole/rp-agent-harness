@@ -29,6 +29,19 @@ export interface HiveRegistry {
   agents: Record<string, HiveAgentMeta & { status: string; lastSeen: number }>;
 }
 
+/** A message the router just delivered, with its resolved recipient ids. Drives
+ *  the envelope-handoff animation on the office floor. `targets` is `['human']`
+ *  when the message was escalated to the human approval queue. */
+export interface HiveRouteEvent {
+  id: string;
+  from: string;
+  to: string;
+  act: 'request' | 'inform' | 'propose' | 'query' | 'agree' | 'refuse' | 'done';
+  subject: string;
+  targets: string[];
+  needsHuman: boolean;
+}
+
 export interface SpawnPtyOptions {
   id: string;
   cwd: string;
@@ -174,6 +187,11 @@ const api = {
     const listener = (_e: IpcRendererEvent, payload: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string }) => cb(payload);
     ipcRenderer.on('hive:hookEvent', listener);
     return () => ipcRenderer.removeListener('hive:hookEvent', listener);
+  },
+  onHiveMessage: (cb: (e: HiveRouteEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: HiveRouteEvent) => cb(payload);
+    ipcRenderer.on('hive:message', listener);
+    return () => ipcRenderer.removeListener('hive:message', listener);
   },
 
   // ─── Quit confirmation ───────────────────────────────────────────────────

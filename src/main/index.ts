@@ -16,7 +16,10 @@ import { MemoryManager } from './memory';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const ptyManager = new PtyManager();
-const hive = new HiveManager(() => readConfig().harnessHome);
+const hive = new HiveManager(
+  () => readConfig().harnessHome,
+  (channel, payload) => mainWindow?.webContents?.send(channel, payload)
+);
 const hookServer = new HookServer(hive, () => mainWindow?.webContents ?? null);
 const memory = new MemoryManager(
   () => readConfig().harnessHome,

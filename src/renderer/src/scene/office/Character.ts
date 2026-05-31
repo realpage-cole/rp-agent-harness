@@ -2,7 +2,7 @@ import { Container, Graphics, Texture } from 'pixi.js';
 import { CharacterSprite, type Direction, type AnimState } from './CharacterSprite';
 import { findPath } from './pathfinding';
 import type { TiledMapRenderer } from './TiledMapRenderer';
-import { ToolBubble } from './ToolBubble';
+import { ThoughtBubble } from './ThoughtBubble';
 
 // Adapted from shahar061/the-office (office/characters/Character.ts).
 // Differences: keyed by our dynamic agentId (not a fixed role); seat tile +
@@ -37,6 +37,13 @@ const SIT_OFFSET_SIDE = 4; // left/right: a smaller drop plus the sideways tuck
 const SEAT_LEG_CROP = 8;
 const SEAT_BACK_CROP = 2;
 
+// Idle 30/30 loop: between tasks an agent alternates roaming the floor with
+// resting at its own desk — for every IDLE_LINGER_SECONDS it spends lingering it
+// then sits at its desk for DESK_REST_SECONDS, and repeats. Working agents skip
+// this entirely (they stay seated via sitAtDesk).
+const IDLE_LINGER_SECONDS = 30;
+const DESK_REST_SECONDS = 30;
+
 interface CharacterOptions {
   agentId: string;
   mapRenderer: TiledMapRenderer;
@@ -67,6 +74,10 @@ export class Character {
   private wandering = false;
   private idleTimer = 0;
   private idleWanderDelay = 1 + Math.random() * 3;
+  // Idle 30/30 loop state (see constants above). Active only between tasks.
+  private idleLoop = false;
+  private idleLoopPhase: 'linger' | 'toDesk' | 'resting' = 'linger';
+  private idleLoopTimer = 0;
   private direction: Direction = 'down';
   private arrivalCallback: (() => void) | null = null;
 
@@ -76,7 +87,7 @@ export class Character {
   private fadeElapsed = 0;
   private hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private toolBubble: ToolBubble;
+  private thoughtBubble: ThoughtBubble;
   private workGlow: Graphics;
   private workGlowElapsed = 0;
   private glowOn = false;
@@ -101,7 +112,7 @@ export class Character {
     this.py = pos.y + this.mapRenderer.tileSize;
     this.sprite.setPosition(this.px, this.py);
 
-    this.toolBubble = new ToolBubble();
+    this.thoughtBubble = new ThoughtBubble();
 
     this.workGlow = new Graphics();
     this.workGlow.circle(0, 0, 14);
@@ -133,14 +144,29 @@ export class Character {
   }
 
   walkToAndThen(tile: { x: number; y: number }, callback: () => void): void {
+    this.idleLoop = false; // a directed walk-and-do (e.g. a café break) owns the avatar
     this.arrivalCallback = callback;
     this.moveTo(tile);
+    if (this.state !== 'walk') {
+      // No path produced. If we're already on the tile, fire the callback now;
+      // otherwise it's unreachable — drop it so we don't "arrive" somewhere else.
+      this.arrivalCallback = null;
+      const t = this.getTilePosition();
+      if (t.x === tile.x && t.y === tile.y) callback();
+    }
   }
 
   /** Sit at the assigned desk, facing the monitor. Walks there first if away.
    *  `working` toggles the pulsing focus halo. This is the default pose — agents
    *  stay seated unless blocked. */
   sitAtDesk(working: boolean): void {
+    this.idleLoop = false;     // an explicit desk command ends the idle loop
+    this.walkToDeskAndSit(working);
+  }
+
+  /** Walk to the home desk (if away) and sit. `working` toggles the focus halo.
+   *  Shared by sitAtDesk (real work/wait) and the idle-loop rest. */
+  private walkToDeskAndSit(working: boolean): void {
     this.glowOn = working;
     this.wandering = false;
     const t = this.getTilePosition();
@@ -156,27 +182,60 @@ export class Character {
 
   /** Snap into the seated pose at the current (desk) tile. */
   private applySit(): void {
+    this.applySitPose(this.seatDirection);
+  }
+
+  /** Snap into a seated pose facing `dir` at the current tile. Shared by the
+   *  home desk (applySit) and any café seat (sitInPlace). */
+  private applySitPose(dir: Direction): void {
     this.state = 'idle';
     this.pendingWork = null;
     this.pendingSit = false;
     this.path = [];
     this.sitting = true;
-    this.direction = this.seatDirection;
-    this.sprite.setAnimation('idle', this.seatDirection);
+    this.direction = dir;
+    this.sprite.setAnimation('idle', dir);
     // Slide toward the desk so the agent tucks in instead of floating in the
     // aisle, then crop the legs so they read as seated (no standing legs).
     let dx = 0, dy = 0;
-    switch (this.seatDirection) {
+    switch (dir) {
       case 'down':  dy = SIT_OFFSET_DOWN; break;
       case 'up':    dy = SIT_OFFSET_UP; break;
       case 'left':  dx = -SIT_OFFSET; dy = SIT_OFFSET_SIDE; break;
       case 'right': dx = SIT_OFFSET; dy = SIT_OFFSET_SIDE; break;
     }
     this.sprite.setPosition(this.px + dx, this.py + dy);
-    this.sprite.setSeatedCrop(this.seatDirection === 'down' ? SEAT_LEG_CROP : SEAT_BACK_CROP);
+    this.sprite.setSeatedCrop(dir === 'down' ? SEAT_LEG_CROP : SEAT_BACK_CROP);
+  }
+
+  /** Sit on a café seat at the CURRENT tile, facing `dir`. The agent must have
+   *  already walked onto the seat tile (drive this from walkToAndThen). Unlike
+   *  sitAtDesk this leaves the agent's home desk untouched and never lights the
+   *  focus halo — it's a break, not work. */
+  sitInPlace(dir: Direction): void {
+    this.idleLoop = false;
+    this.wandering = false;
+    this.glowOn = false;
+    this.arrivalCallback = null;
+    this.applySitPose(dir);
+  }
+
+  /** True while the avatar is parked in a seated pose (desk or café). */
+  isSitting(): boolean {
+    return this.sitting;
+  }
+
+  /** Turn a standing/idle avatar to face `dir` (e.g. toward the coffee machine
+   *  while taking a standing break). No-op mid-walk or while seated. */
+  faceDirection(dir: Direction): void {
+    this.direction = dir;
+    if (!this.sitting && this.state !== 'walk') {
+      this.sprite.setAnimation('idle', dir);
+    }
   }
 
   setIdle(): void {
+    this.idleLoop = false;
     this.state = 'idle';
     this.pendingWork = null;
     this.pendingSit = false;
@@ -192,6 +251,17 @@ export class Character {
   /** Roam the office between tasks. Picks random walkable tiles and strolls
    *  to them until the agent is given work again. */
   startWandering(): void {
+    if (this.idleLoop && this.wandering) return; // already in the linger phase
+    // (Re)enter the idle loop at its linger phase, then begin roaming.
+    this.idleLoop = true;
+    this.idleLoopPhase = 'linger';
+    this.idleLoopTimer = 0;
+    this.beginWander();
+  }
+
+  /** Low-level: start roaming the floor now. Drives the linger phase of the
+   *  idle loop (and is reused when a rest ends). Does not touch the loop state. */
+  private beginWander(): void {
     if (this.wandering) return;
     this.glowOn = false;
     this.sitting = false;
@@ -210,17 +280,13 @@ export class Character {
 
   /** Walk to an arbitrary tile (e.g. the waiting area when blocked); stands on arrival. */
   walkToTile(tile: { x: number; y: number }): void {
+    this.idleLoop = false;
     this.pendingWork = null;
     this.pendingSit = false;
     this.sitting = false;
     this.wandering = false;
     this.arrivalCallback = null;
     this.moveTo(tile);
-  }
-
-  /** Show a plain-text card (the last user prompt) above the seated agent. */
-  showPrompt(text: string): void {
-    this.toolBubble.showText(text);
   }
 
   repositionTo(tx: number, ty: number): void {
@@ -231,12 +297,26 @@ export class Character {
     this.sprite.setPosition(this.px, this.py);
   }
 
-  showToolBubble(toolName: string, target: string): void {
-    this.toolBubble.show(toolName, target);
+  /** Show what the agent is doing right now in the thought cloud above its head.
+   *  Empty text renders an animated "…" (thinking); `tool` adds a small glyph. */
+  showThought(text: string, tool?: string): void {
+    this.thoughtBubble.show(text, tool);
   }
 
-  hideToolBubble(): void {
-    this.toolBubble.startLinger();
+  /** Fade the thought cloud out after a short linger — the agent went quiet. */
+  hideThought(): void {
+    this.thoughtBubble.startLinger();
+  }
+
+  /** The thought cloud's current base screen rect (no lift), or null if hidden.
+   *  The scene uses this to detect and resolve overlapping bubbles. */
+  getThoughtLayout(): { x: number; y: number; w: number; h: number } | null {
+    return this.thoughtBubble.getLayout(this.px, this.py);
+  }
+
+  /** Shift this avatar's thought cloud up by `px` so it clears a nearby one. */
+  setThoughtLift(px: number): void {
+    this.thoughtBubble.setLift(px);
   }
 
   setStatusGlyph(glyph: StatusGlyph): void {
@@ -267,7 +347,7 @@ export class Character {
     parent.addChild(this.workGlow);
     parent.addChild(this.sprite.container);
     this.sprite.container.addChild(this.overlay);
-    parent.addChild(this.toolBubble.container);
+    parent.addChild(this.thoughtBubble.container);
     this.enableClick();
     this.fadeDirection = 'in';
     this.fadeDuration = 0.5;
@@ -298,8 +378,8 @@ export class Character {
         if (reachedZero) {
           this.isVisible = false;
           this.sprite.container.parent?.removeChild(this.sprite.container);
-          this.toolBubble.hide();
-          this.toolBubble.container.parent?.removeChild(this.toolBubble.container);
+          this.thoughtBubble.hide();
+          this.thoughtBubble.container.parent?.removeChild(this.thoughtBubble.container);
           this.workGlow.parent?.removeChild(this.workGlow);
         }
       }
@@ -311,15 +391,16 @@ export class Character {
       }
     }
 
-    this.toolBubble.update(dt);
+    this.thoughtBubble.update(dt);
     if (!this.isVisible) return;
 
     // Working agents stay seated; between tasks they wander the office.
     if (this.state === 'walk') this.updateWalk(dt);
     else if (this.wandering) this.updateWander(dt);
+    if (this.idleLoop) this.updateIdleLoop(dt);
 
     this.sprite.container.zIndex = this.py;
-    this.toolBubble.setPosition(this.px, this.py);
+    this.thoughtBubble.setPosition(this.px, this.py);
 
     // work glow
     const ts = this.mapRenderer.tileSize;
@@ -409,6 +490,43 @@ export class Character {
     this.sprite.setPosition(this.px, this.py);
   }
 
+  /** Drive the idle 30/30 loop: linger on the floor, then rest at the desk,
+   *  then linger again — independent of the low-level walk/wander animation. */
+  private updateIdleLoop(dt: number): void {
+    switch (this.idleLoopPhase) {
+      case 'linger':
+        // Roaming (beginWander) handles the motion; we just time the phase.
+        this.idleLoopTimer += dt;
+        if (this.idleLoopTimer >= IDLE_LINGER_SECONDS) {
+          this.idleLoopPhase = 'toDesk';
+          this.idleLoopTimer = 0;
+          this.walkToDeskAndSit(false); // head home and sit (no focus halo)
+        }
+        break;
+      case 'toDesk':
+        // Wait until we've actually arrived and sat down, then start the rest
+        // clock. Watchdog: if the desk is somehow unreachable, resume lingering.
+        this.idleLoopTimer += dt;
+        if (this.sitting) {
+          this.idleLoopPhase = 'resting';
+          this.idleLoopTimer = 0;
+        } else if (this.idleLoopTimer >= 20) {
+          this.idleLoopPhase = 'linger';
+          this.idleLoopTimer = 0;
+          this.beginWander();
+        }
+        break;
+      case 'resting':
+        this.idleLoopTimer += dt;
+        if (this.idleLoopTimer >= DESK_REST_SECONDS) {
+          this.idleLoopPhase = 'linger';
+          this.idleLoopTimer = 0;
+          this.beginWander(); // stand up and roam again
+        }
+        break;
+    }
+  }
+
   private updateWander(dt: number): void {
     this.idleTimer += dt;
     if (this.idleTimer < this.idleWanderDelay) return;
@@ -431,7 +549,7 @@ export class Character {
 
   destroy(): void {
     if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
-    this.toolBubble.destroy();
+    this.thoughtBubble.destroy();
     this.sprite.destroy();
     this.workGlow.destroy();
     this.overlay.destroy();

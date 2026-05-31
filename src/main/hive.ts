@@ -83,8 +83,16 @@ function shortRand(): string {
 // ─── HiveManager ────────────────────────────────────────────────────────────
 
 export class HiveManager {
-  /** Lazily resolve harnessHome so the hive follows config changes. */
-  constructor(private getHome: () => string | null) {}
+  /**
+   * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
+   * @param emit     Optional sink for renderer-facing events (set by the main
+   *                 process to `webContents.send`). Used to animate routed
+   *                 messages on the office floor; a no-op in tests/headless.
+   */
+  constructor(
+    private getHome: () => string | null,
+    private emit?: (channel: string, payload: unknown) => void
+  ) {}
 
   private routerTimer: NodeJS.Timeout | null = null;
 
@@ -335,6 +343,7 @@ export class HiveManager {
     if (msg.needs_human) {
       this.atomicWriteJson(join(this.root()!, 'approvals', `${msg.id}.json`), msg);
       this.appendLog({ kind: 'escalate', from: msg.from, to: msg.to, subject: msg.subject, id: msg.id });
+      this.emitMessage(msg, ['human']);
       return;
     }
     const reg = this.registry();
@@ -343,6 +352,21 @@ export class HiveManager {
       : [msg.to === 'god' ? (reg.godId ?? 'god') : msg.to];
     for (const t of targets) this.deliver(msg, t);
     this.appendLog({ kind: 'message', from: msg.from, to: msg.to, act: msg.act, subject: msg.subject, id: msg.id });
+    this.emitMessage(msg, targets);
+  }
+
+  /** Tell the renderer a message was routed, with its resolved recipients, so
+   *  the floor can fly an envelope from the sender to each one. Best-effort. */
+  private emitMessage(msg: HiveMessage, targets: string[]): void {
+    this.emit?.('hive:message', {
+      id: msg.id,
+      from: msg.from,
+      to: msg.to,
+      act: msg.act,
+      subject: msg.subject,
+      targets,
+      needsHuman: msg.needs_human
+    });
   }
 
   // — router: drain outboxes → inboxes —

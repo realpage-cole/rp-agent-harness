@@ -79,11 +79,19 @@ function drawHead(buf: Buf, skin: string): void {
 
 type Brow = 'flat' | 'angry' | 'raised' | 'soft';
 type Mouth = 'neutral' | 'smile' | 'frown' | 'grin';
-function drawFace(buf: Buf, skin: string, brow: Brow, mouth: Mouth, blush: boolean): void {
+function drawFace(buf: Buf, skin: string, brow: Brow, mouth: Mouth, blush: boolean, lashes = false): void {
   const s = SKIN[skin];
   const white: RGB = [250, 248, 244], pup: RGB = [46, 38, 42];
   for (const [a, b, p] of [[5, 6, 6], [10, 11, 10]] as const) {
     set(buf, a, 9, white); set(buf, b, 9, white); set(buf, p, 9, pup);
+  }
+  // Feminine eyes: a dark upper lash line + an outer flick, and a bright glint
+  // in each pupil so they read as bigger, rounder, more expressive.
+  if (lashes) {
+    const lash: RGB = [54, 40, 48], glint: RGB = [252, 250, 248];
+    for (const x of [5, 6, 10, 11]) set(buf, x, 8, lash);
+    set(buf, 4, 8, lash); set(buf, 12, 8, lash);
+    set(buf, 5, 9, glint); set(buf, 10, 9, glint);
   }
   if (brow === 'flat') for (const x of [5, 6, 10, 11]) set(buf, x, 7, s.line);
   else if (brow === 'angry') { set(buf, 5, 8, s.line); set(buf, 6, 7, s.line); set(buf, 10, 7, s.line); set(buf, 11, 8, s.line); }
@@ -213,7 +221,29 @@ const styleSpiky: HairFn = (buf, color, skinBase) => {
   for (const [x, y] of spikes) set(buf, x, y, hi);
 };
 
-const HAIR_FNS = { styleShort, styleFloppy, styleFrame, styleBun, styleCurly, styleMessy, styleRecede, styleSpiky };
+// Bald: a rounded skin crown (with a sheen) and only a low horseshoe fringe of
+// hair around the temples / back of the head.
+const styleBald: HairFn = (buf, color, skinBase, a) => {
+  const [shi, sbase, ssh] = shades(skinBase, 1.1, 0.82);
+  // rounded skin dome above the forehead
+  for (let x = 6; x <= 11; x++) set(buf, x, 2, sbase);
+  for (let x = 5; x <= 12; x++) set(buf, x, 3, sbase);
+  for (let x = HX0; x <= HX1; x++) set(buf, x, 4, sbase);
+  // bald-head sheen + side falloff
+  for (const x of [7, 8, 9]) set(buf, x, 2, shi);
+  set(buf, 6, 3, shi); set(buf, 7, 3, shi);
+  set(buf, 5, 3, ssh); set(buf, 12, 3, ssh); set(buf, HX1, 4, ssh);
+  // low horseshoe hair fringe — sides only, leaving the crown bald.
+  const [, base, sh] = shades(color);
+  const top = a.recede ? 8 : 6; // recede:1 → only a thin fringe very low
+  for (let y = top; y <= 10; y++) {
+    set(buf, HX0 - 1, y, base); set(buf, HX0, y, base);
+    set(buf, HX1, y, base); set(buf, HX1 + 1, y, base);
+  }
+  for (let y = top; y <= 10; y++) { set(buf, HX0 - 1, y, sh); set(buf, HX1 + 1, y, sh); }
+};
+
+const HAIR_FNS = { styleShort, styleFloppy, styleFrame, styleBun, styleCurly, styleMessy, styleRecede, styleSpiky, styleBald };
 type HairStyle = keyof typeof HAIR_FNS;
 
 // ─── facial hair ─────────────────────────────────────────────────────────────
@@ -236,28 +266,41 @@ function drawFacial(buf: Buf, kind: Facial, color: RGB): void {
 }
 
 // ─── glasses ─────────────────────────────────────────────────────────────────
+// Clear prescription glasses (NOT sunglasses): a thin rim that frames each eye
+// without covering it. The lens interior keeps the eye/skin already drawn, plus
+// a small white glint so the lens reads as transparent glass.
 function drawGlasses(buf: Buf): void {
-  for (const x of [4, 5, 6, 7]) set(buf, x, 8, OUTLINE);
-  set(buf, 4, 9, OUTLINE); set(buf, 7, 9, OUTLINE);
-  for (const x of [4, 5, 6, 7]) set(buf, x, 10, OUTLINE);
-  for (const x of [9, 10, 11, 12]) set(buf, x, 8, OUTLINE);
-  set(buf, 9, 9, OUTLINE); set(buf, 12, 9, OUTLINE);
-  for (const x of [9, 10, 11, 12]) set(buf, x, 10, OUTLINE);
-  set(buf, 8, 9, OUTLINE);
-  set(buf, 3, 9, OUTLINE); set(buf, 13, 9, OUTLINE);
+  const frame: RGB = [60, 54, 62];
+  const glint: RGB = [236, 240, 246];
+  // Left lens rim around the eye at (5-6, 9): top, bottom, outer + inner edge.
+  for (const x of [5, 6]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+  set(buf, 4, 9, frame); set(buf, 7, 9, frame);
+  set(buf, 4, 8, frame); set(buf, 7, 8, frame);
+  // Right lens rim around the eye at (10-11, 9).
+  for (const x of [10, 11]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+  set(buf, 9, 9, frame); set(buf, 12, 9, frame);
+  set(buf, 9, 8, frame); set(buf, 12, 8, frame);
+  // Bridge over the nose + temple arms out to the hair.
+  set(buf, 8, 8, frame);
+  set(buf, 3, 9, frame); set(buf, 13, 9, frame);
+  // Glass glint on each rim's top-outer corner so the lens reads as clear glass.
+  set(buf, 4, 8, glint); set(buf, 9, 8, glint);
 }
 
 // ─── clothing ────────────────────────────────────────────────────────────────
 type Cloth = 'suit' | 'dressshirt' | 'polo' | 'blouse' | 'cardigan' | 'sweater';
-function bodyShape(buf: Buf, col: RGB): void {
+function bodyShape(buf: Buf, col: RGB, heavy = false): void {
   const [, base, sh] = shades(col);
-  const rows: [number, number, number][] = [[19, 6, 11], [20, 4, 13], [21, 3, 14], [22, 2, 15], [23, 2, 15], [24, 1, 16], [25, 1, 16], [26, 1, 16], [27, 1, 16]];
+  const rows: [number, number, number][] = heavy
+    ? [[19, 5, 12], [20, 3, 14], [21, 2, 15], [22, 1, 16], [23, 1, 16], [24, 0, 17], [25, 0, 17], [26, 0, 17], [27, 0, 17]]
+    : [[19, 6, 11], [20, 4, 13], [21, 3, 14], [22, 2, 15], [23, 2, 15], [24, 1, 16], [25, 1, 16], [26, 1, 16], [27, 1, 16]];
   for (const [y, a, b] of rows) rect(buf, a, y, b, y, base);
-  for (let y = 22; y < 28; y++) { set(buf, 2, y, sh); set(buf, 15, y, sh); }
+  const [lo, hi] = heavy ? [1, 16] : [2, 15];
+  for (let y = 22; y < 28; y++) { set(buf, lo, y, sh); set(buf, hi, y, sh); }
 }
-function drawClothing(buf: Buf, kind: Cloth, c1: RGB, c2: RGB | undefined, tie: RGB | undefined, skin: string): void {
+function drawClothing(buf: Buf, kind: Cloth, c1: RGB, c2: RGB | undefined, tie: RGB | undefined, skin: string, heavy = false): void {
   const [hi, base, sh] = shades(c1);
-  bodyShape(buf, c1);
+  bodyShape(buf, c1, heavy);
   if (kind === 'suit') {
     const white: RGB = [238, 238, 236];
     for (const [x, y] of [[8, 19], [9, 19], [7, 20], [8, 20], [9, 20], [10, 20], [8, 21], [9, 21]] as const) set(buf, x, y, white);
@@ -309,11 +352,18 @@ function drawSceneLegs(buf: Buf, pants: RGB, phase: number): void {
 
 function drawSceneTorso(buf: Buf, r: Recipe, back: boolean): void {
   const [hi, base, sh] = shades(r.c1);
-  // shoulders → torso, narrower than the portrait bust
-  rect(buf, 4, 18, 13, 18, base);
-  rect(buf, 3, 19, 14, 19, base);
-  rect(buf, 4, 20, 13, 24, base);
-  for (let y = 20; y <= 24; y++) { set(buf, 3, y, sh); set(buf, 14, y, sh); set(buf, 13, y, sh); } // arms / right shade
+  // shoulders → torso, narrower than the portrait bust (wider + rounder if heavy)
+  if (r.heavy) {
+    rect(buf, 3, 18, 14, 18, base);
+    rect(buf, 2, 19, 15, 19, base);
+    rect(buf, 2, 20, 15, 24, base);
+    for (let y = 20; y <= 24; y++) { set(buf, 2, y, sh); set(buf, 15, y, sh); set(buf, 14, y, sh); }
+  } else {
+    rect(buf, 4, 18, 13, 18, base);
+    rect(buf, 3, 19, 14, 19, base);
+    rect(buf, 4, 20, 13, 24, base);
+    for (let y = 20; y <= 24; y++) { set(buf, 3, y, sh); set(buf, 14, y, sh); set(buf, 13, y, sh); } // arms / right shade
+  }
   if (back) {
     // plain back with a collar line + center seam
     rect(buf, 6, 18, 11, 18, sh);
@@ -348,6 +398,7 @@ function drawSceneTorso(buf: Buf, r: Recipe, back: boolean): void {
 /** Back of the head: a rounded hair-covered skull with crown sheen + nape, no face. */
 function drawHeadBack(buf: Buf, r: Recipe): void {
   const s = SKIN[r.skin];
+  if (r.hair === 'styleBald') { drawHeadBackBald(buf, r); return; }
   const [hi, base, sh] = shades(r.hairc);
   // rounded skull silhouette (narrow at crown + nape, full through the middle)
   const rows: [number, number, number][] = [
@@ -368,6 +419,27 @@ function drawHeadBack(buf: Buf, r: Recipe): void {
   for (let y = 4; y <= 12; y++) set(buf, 8, y, sh);   // part line
   // nape + neck (skin)
   rect(buf, 7, 14, 10, 14, sh);
+  rect(buf, 7, 15, 10, 17, s.sh);
+  rect(buf, 7, 15, 9, 15, s.base);
+}
+
+/** Back of a bald head: a skin skull with a sheen and a low hair fringe ring. */
+function drawHeadBackBald(buf: Buf, r: Recipe): void {
+  const s = SKIN[r.skin];
+  const [shi, sbase, ssh] = shades(s.base, 1.1, 0.82);
+  const rows: [number, number, number][] = [
+    [2, 6, 11], [3, 5, 12], [4, 4, 13], [5, 4, 13], [6, 4, 13], [7, 4, 13], [8, 4, 13],
+    [9, 4, 13], [10, 4, 13], [11, 4, 13], [12, 4, 13], [13, 5, 12], [14, 6, 11],
+  ];
+  for (const [y, a, b] of rows) rect(buf, a, y, b, y, sbase);
+  for (let y = 4; y <= 12; y++) { set(buf, 4, y, ssh); set(buf, 13, y, ssh); }
+  for (const [x, y] of [[7, 2], [8, 2], [9, 2], [8, 3], [9, 4], [9, 5]] as const) set(buf, x, y, shi);
+  // low hair fringe ring around the back/sides
+  const [, base, sh] = shades(r.hairc);
+  for (let x = 4; x <= 13; x++) { set(buf, x, 11, base); set(buf, x, 12, base); }
+  for (const x of [4, 13]) { set(buf, x, 11, sh); set(buf, x, 12, sh); }
+  // nape + neck (skin)
+  rect(buf, 7, 14, 10, 14, s.sh);
   rect(buf, 7, 15, 10, 17, s.sh);
   rect(buf, 7, 15, 9, 15, s.base);
 }
@@ -396,31 +468,52 @@ interface Recipe {
   skin: string; hairc: RGB; hair: HairStyle; hairargs?: HairArgs;
   cloth: Cloth; c1: RGB; c2?: RGB; tie?: RGB; pants?: RGB;
   brow?: Brow; mouth?: Mouth; blush?: boolean; facial?: Facial; glasses?: boolean;
+  /** Bigger, lashed eyes for a more feminine, expressive face. */
+  lashes?: boolean;
+  /** Heavier build: chubby cheeks, a double chin, and a wider torso. */
+  heavy?: boolean;
+}
+
+// Puff the lower face into round cheeks + a double chin so a character reads as
+// heavier. Runs after drawHead (adds skin at the jaw) and is safe before the
+// face features, which sit higher (eyes y9, mouth y14).
+function drawHeavyFace(buf: Buf, skin: string): void {
+  const s = SKIN[skin];
+  // Chubby cheeks: bulge the jaw outward past the normal x4..13 head box.
+  for (let y = 11; y <= 15; y++) { set(buf, HX0 - 1, y, s.base); set(buf, HX1 + 1, y, s.base); }
+  set(buf, HX0 - 1, 15, s.sh); set(buf, HX1 + 1, 15, s.sh);
+  // Fuller, rounder lower jaw.
+  for (const x of [5, 6, 11, 12]) set(buf, x, 16, s.base);
+  // Double chin: a second rounded roll under the jaw.
+  rect(buf, 6, 17, 11, 18, s.base);
+  for (const x of [6, 7, 8, 9, 10, 11]) set(buf, x, 18, s.sh);
+  set(buf, 7, 17, s.sh); set(buf, 10, 17, s.sh); // crease shadow between chin + roll
 }
 
 const RECIPES: Record<OfficeCharacterName, Recipe> = {
   michael:  { skin: 'light', hairc: [58, 42, 28],   hair: 'styleShort',  hairargs: { part: 'L' }, cloth: 'suit', c1: [58, 63, 74], tie: [170, 58, 58], brow: 'flat', mouth: 'smile' },
   jim:      { skin: 'light', hairc: [92, 60, 34],   hair: 'styleFloppy', cloth: 'dressshirt', c1: [172, 196, 224], tie: [120, 130, 150], brow: 'flat', mouth: 'smile' },
-  pam:      { skin: 'light', hairc: [108, 68, 38],  hair: 'styleFrame',  hairargs: { length: 17 }, cloth: 'cardigan', c1: [200, 190, 172], c2: [230, 160, 150], brow: 'soft', mouth: 'smile', blush: true },
+  pam:      { skin: 'light', hairc: [120, 76, 42],  hair: 'styleFrame',  hairargs: { length: 18, vol: 2 }, cloth: 'cardigan', c1: [236, 174, 192], c2: [244, 242, 238], brow: 'soft', mouth: 'smile', blush: true, lashes: true },
   dwight:   { skin: 'light', hairc: [64, 48, 28],   hair: 'styleShort',  hairargs: { part: 'L', recede: 1 }, cloth: 'dressshirt', c1: [184, 155, 62], tie: [120, 82, 46], glasses: true, brow: 'angry', mouth: 'neutral' },
-  kevin:    { skin: 'light', hairc: [58, 44, 30],   hair: 'styleRecede', cloth: 'polo', c1: [110, 140, 180], c2: [90, 120, 160], brow: 'flat', mouth: 'neutral' },
-  angela:   { skin: 'light', hairc: [186, 154, 90], hair: 'styleBun',    cloth: 'cardigan', c1: [150, 146, 170], c2: [235, 233, 226], brow: 'angry', mouth: 'frown' },
-  oscar:    { skin: 'tan',   hairc: [28, 22, 18],   hair: 'styleShort',  hairargs: { part: 'L' }, cloth: 'sweater', c1: [122, 60, 74], glasses: true, brow: 'flat', mouth: 'smile' },
-  stanley:  { skin: 'dark',  hairc: [60, 54, 48],   hair: 'styleRecede', cloth: 'dressshirt', c1: [150, 120, 86], tie: [120, 78, 52], glasses: true, facial: 'mustache', brow: 'flat', mouth: 'neutral' },
-  phyllis:  { skin: 'light', hairc: [196, 162, 110], hair: 'styleCurly', cloth: 'blouse', c1: [202, 160, 192], glasses: true, brow: 'soft', mouth: 'smile' },
-  andy:     { skin: 'light', hairc: [74, 51, 32],   hair: 'styleShort',  hairargs: { part: 'R' }, cloth: 'polo', c1: [176, 65, 58], c2: [150, 50, 46], brow: 'raised', mouth: 'grin' },
-  kelly:    { skin: 'tan',   hairc: [24, 18, 22],   hair: 'styleFrame',  hairargs: { length: 20, vol: 1 }, cloth: 'blouse', c1: [212, 90, 158], brow: 'soft', mouth: 'smile', blush: true },
+  kevin:    { skin: 'light', hairc: [58, 44, 30],   hair: 'styleBald',   cloth: 'polo', c1: [110, 140, 180], c2: [90, 120, 160], brow: 'flat', mouth: 'neutral', heavy: true },
+  angela:   { skin: 'light', hairc: [186, 154, 90], hair: 'styleBun',    cloth: 'cardigan', c1: [150, 146, 170], c2: [235, 233, 226], brow: 'angry', mouth: 'frown', lashes: true },
+  oscar:    { skin: 'tan',   hairc: [28, 22, 18],   hair: 'styleShort',  hairargs: { part: 'L' }, cloth: 'sweater', c1: [122, 60, 74], brow: 'flat', mouth: 'smile' },
+  stanley:  { skin: 'dark',  hairc: [60, 54, 48],   hair: 'styleRecede', cloth: 'dressshirt', c1: [150, 120, 86], tie: [120, 78, 52], glasses: true, facial: 'mustache', brow: 'flat', mouth: 'neutral', heavy: true },
+  phyllis:  { skin: 'light', hairc: [196, 162, 110], hair: 'styleCurly', cloth: 'blouse', c1: [202, 160, 192], glasses: true, brow: 'soft', mouth: 'smile', lashes: true, heavy: true },
+  andy:     { skin: 'light', hairc: [74, 51, 32],   hair: 'styleShort',  hairargs: { part: 'R' }, cloth: 'polo', c1: [176, 65, 58], c2: [150, 50, 46], brow: 'raised', mouth: 'smile' },
+  kelly:    { skin: 'tan',   hairc: [24, 18, 22],   hair: 'styleFrame',  hairargs: { length: 20, vol: 1 }, cloth: 'blouse', c1: [212, 90, 158], brow: 'soft', mouth: 'smile', blush: true, lashes: true },
   ryan:     { skin: 'light', hairc: [42, 32, 24],   hair: 'styleSpiky',  cloth: 'suit', c1: [58, 58, 68], tie: [40, 40, 50], brow: 'flat', mouth: 'neutral' },
-  toby:     { skin: 'light', hairc: [106, 90, 66],  hair: 'styleShort',  hairargs: { part: 'L', recede: 1 }, cloth: 'dressshirt', c1: [150, 150, 120], glasses: true, facial: 'mustacheSm', brow: 'soft', mouth: 'frown' },
-  creed:    { skin: 'light', hairc: [186, 182, 172], hair: 'styleMessy', hairargs: { length: 9 }, cloth: 'dressshirt', c1: [126, 130, 96], facial: 'stubble', brow: 'flat', mouth: 'neutral' },
-  meredith: { skin: 'light', hairc: [154, 82, 46],  hair: 'styleMessy',  hairargs: { length: 15 }, cloth: 'blouse', c1: [176, 86, 74], brow: 'raised', mouth: 'smile' },
+  toby:     { skin: 'light', hairc: [106, 90, 66],  hair: 'styleShort',  hairargs: { part: 'L', recede: 1 }, cloth: 'dressshirt', c1: [150, 150, 120], facial: 'mustacheSm', brow: 'soft', mouth: 'frown' },
+  creed:    { skin: 'light', hairc: [170, 166, 156], hair: 'styleBald',   cloth: 'dressshirt', c1: [126, 130, 96], facial: 'stubble', brow: 'flat', mouth: 'neutral' },
+  meredith: { skin: 'light', hairc: [154, 82, 46],  hair: 'styleMessy',  hairargs: { length: 15 }, cloth: 'blouse', c1: [176, 86, 74], brow: 'raised', mouth: 'smile', lashes: true },
 };
 
 /** The face/hair group (head → face → facial hair → hair → glasses), no clothing. */
 function drawHeadGroup(buf: Buf, r: Recipe): void {
   const skinBase = SKIN[r.skin].base;
   drawHead(buf, r.skin);
-  drawFace(buf, r.skin, r.brow ?? 'flat', r.mouth ?? 'neutral', r.blush ?? false);
+  if (r.heavy) drawHeavyFace(buf, r.skin);
+  drawFace(buf, r.skin, r.brow ?? 'flat', r.mouth ?? 'neutral', r.blush ?? false, r.lashes ?? false);
   if (r.facial) drawFacial(buf, r.facial, r.hairc);
   HAIR_FNS[r.hair](buf, r.hairc, skinBase, r.hairargs ?? {});
   if (r.glasses) drawGlasses(buf);
@@ -435,7 +528,7 @@ function defaultPants(r: Recipe): RGB {
 function compose(r: Recipe): Buf {
   CUR_W = PORTRAIT_W; CUR_H = PORTRAIT_H;
   const buf = new Uint8ClampedArray(PORTRAIT_W * PORTRAIT_H * 4);
-  drawClothing(buf, r.cloth, r.c1, r.c2, r.tie, r.skin);
+  drawClothing(buf, r.cloth, r.c1, r.c2, r.tie, r.skin, r.heavy ?? false);
   collarNeck(buf, r.skin);
   drawHeadGroup(buf, r);
   outlinePass(buf);
