@@ -1,0 +1,17 @@
+<nav id="nav">
+  <a class="brand" href="{{ '/' | u }}" aria-label="Munder Difflin Blog home">
+    <span class="brand-mark">MD</span>
+    <span class="brand-word">MUNDER DIFFLIN<span class="sep">/</span><span class="blog">BLOG</span></span>
+  </a>
+  <span class="spacer"></span>
+  <div class="links">
+    <a href="{{ '/' | u }}"{% if page.url == '/' %} aria-current="page"{% endif %}>Latest</a>
+    <a href="{{ '/topics/' | u }}"{% if '/topics/' in page.url %} aria-current="page"{% endif %}>Topics</a>
+    <a href="{{ '/about/' | u }}"{% if '/about/' in page.url %} aria-current="page"{% endif %}>About</a>
+    <a href="{{ site.origin }}">↗ Product</a>
+  </div>
+  <div class="nav-actions">
+    <a class="btn sm" href="{{ site.baseUrl }}feed.xml" aria-label="RSS feed">⤵ RSS</a>
+    <a class="btn sm primary" href="{{ site.origin }}/#install">⤓ Download</a>
+  </div>
+</nav>
