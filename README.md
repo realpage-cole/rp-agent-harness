@@ -21,7 +21,7 @@ you talk to, and visualized as avatars at work on a shared office floor.
 
 <br>
 
-<img src="./docs/banner.png" alt="Munder Difflin — A hive of agents that message, route, and remember" width="820">
+<img src="./docs/media/og.png" alt="Munder Difflin — A hive of agents that message, route, and remember" width="1240">
 
 <br>
 
