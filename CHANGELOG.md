@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-04
+
+### Added
+- **Signed & notarized macOS builds.** The app now ships with a hardened-runtime
+  Developer ID signature and is notarized + stapled by Apple. Because macOS binds a
+  folder-access (TCC) grant to a stable code signature, you're now prompted for
+  Documents/Desktop/Downloads access **once** instead of on every agent action.
+  Usage-description strings explain each prompt. Signing/notarization run in CI only
+  when Apple credentials are present, so contributor builds stay unsigned and green.
+- **Blog at [/blog](https://munderdiffl.in/blog/)** — an Eleventy-generated static blog
+  sharing the landing page's neo-brutalist design system, seeded with the first posts
+  on long-term memory, multi-agent harnesses, and MemPalace, plus tag/topic indexes and
+  an RSS feed.
+- **On-site SEO/AEO metadata** — JSON-LD, `robots.txt`, a root `sitemap.xml`, and richer
+  link-unfurl/meta tags across the site.
+
 ## [0.1.3] — 2026-06-01
 
 ### Added

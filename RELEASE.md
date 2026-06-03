@@ -1,4 +1,4 @@
-# Munder Difflin v0.1.3
+# Munder Difflin v0.1.4
 
 **A local hive of Claude Code agents that run themselves** — messaging, routing, and
 remembering, coordinated by a GOD orchestrator you talk to. Local-first and open source.
@@ -15,22 +15,22 @@ Apple Silicon and Intel.
 ### 🍎 macOS
 | Build | File |
 |---|---|
-| Universal (Apple Silicon + Intel) | [`Munder-Difflin-0.1.3-mac-universal.dmg`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.3-mac-universal.dmg) |
+| Universal (Apple Silicon + Intel) | [`Munder-Difflin-0.1.4-mac-universal.dmg`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.4-mac-universal.dmg) |
 
 ### 🪟 Windows
 | Build | File |
 |---|---|
-| Installer (x64) — *recommended* | [`Munder-Difflin-0.1.3-win-x64-setup.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.3-win-x64-setup.exe) |
-| Portable (x64, no install) | [`Munder-Difflin-0.1.3-win-x64-portable.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.3-win-x64-portable.exe) |
+| Installer (x64) — *recommended* | [`Munder-Difflin-0.1.4-win-x64-setup.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.4-win-x64-setup.exe) |
+| Portable (x64, no install) | [`Munder-Difflin-0.1.4-win-x64-portable.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.4-win-x64-portable.exe) |
 
 ### 🐧 Linux
 | Build | File |
 |---|---|
-| AppImage (x86_64) | [`Munder-Difflin-0.1.3-linux-x86_64.AppImage`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.3-linux-x86_64.AppImage) |
+| AppImage (x86_64) | [`Munder-Difflin-0.1.4-linux-x86_64.AppImage`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.4-linux-x86_64.AppImage) |
 
 ### 📦 Source
-[Source code (zip)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.3.zip) ·
-[Source code (tar.gz)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.3.tar.gz)
+[Source code (zip)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.4.zip) ·
+[Source code (tar.gz)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.4.tar.gz)
 
 > **Verify your download:** [`SHA256SUMS.txt`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/SHA256SUMS.txt) — then `shasum -a 256 -c SHA256SUMS.txt` (macOS/Linux) or `Get-FileHash` (Windows).
 
@@ -41,27 +41,13 @@ Apple Silicon and Intel.
 
 ## First launch
 
-These builds are **not code-signed yet**, so your OS may warn on first open.
-
-- **macOS** — right-click the app → **Open** → **Open**, or run
-  `xattr -dr com.apple.quarantine "/Applications/Munder Difflin.app"`.
-- **Windows** — SmartScreen may show "Windows protected your PC" → **More info** → **Run anyway**.
+- **macOS** — the build is **signed with a Developer ID and notarized by Apple**, so it
+  opens normally. The first time agents touch a folder you'll get a single macOS privacy
+  prompt for Documents/Desktop/Downloads — allow it once and the grant sticks (it covers
+  the `claude` agents the app spawns).
+- **Windows** — not code-signed yet; SmartScreen may show "Windows protected your PC" →
+  **More info** → **Run anyway**.
 - **Linux** — make the AppImage executable: `chmod +x Munder-Difflin-*.AppImage`, then run it.
-
-### macOS keeps asking to access your Documents folder?
-
-Because the build is unsigned, macOS can't durably remember the folder-access grant
-(and **App Translocation** runs an un-de-quarantined app from a random path each
-launch), so the privacy prompt can reappear on every agent action. Two fixes:
-
-1. **Stop translocation first:** move the app into **/Applications**, then run
-   `xattr -dr com.apple.quarantine "/Applications/Munder Difflin.app"` and relaunch.
-2. **Grant access once:** open **System Settings → Privacy & Security → Full Disk
-   Access**, click **+**, add **Munder Difflin**, and toggle it on (this covers the
-   `claude` agents it spawns). Alternatively grant **Files and Folders → Documents**.
-
-Once the app is signed + notarized (see the signing note in `electron-builder.yml`),
-this becomes a single one-time prompt with no extra steps.
 
 ---
 

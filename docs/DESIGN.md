@@ -27,12 +27,15 @@
 4. **One accent, plus play.** Warm **yellow** is the single CTA color; **sky-blue** highlights
    one phrase per headline; **maroon** is the brand/identity tone. Feature cards each get a
    soft **pastel** block (lilac / peach / mint / tan / rose / sky-soft).
-5. **Product-led.** The hero *shows the product* through real captured footage, seated inside a
-   flat, hairline-bordered window. The "How" section uses hand-built static HTML/CSS/SVG
-   illustrations (the floor graph, MemPalace radial recall, GOD + hive graph) drawn in the
-   warm-paper / neo-brutalist theme — ink-bordered node chips, pastel blocks, mono labels — not video.
+5. **Product-led, static.** The hero *shows the product* through a real captured still
+   (`media/og.png`), seated inside a flat, hairline-bordered window. The "How" section uses
+   hand-built **static** HTML/CSS/SVG illustrations (the floor graph, MemPalace radial recall,
+   GOD + hive graph) drawn in the warm-paper / neo-brutalist theme — ink-bordered node chips,
+   pastel blocks, mono labels. No video, no looping illustration motion — every illustration
+   reads as a finished, frozen still.
 6. **Restraint in motion.** Reveal-on-scroll + a neo-brutalist press on hover (translate +
-   shadow grow). On-screen-only video playback. All disabled under `prefers-reduced-motion`.
+   shadow grow). Nothing else moves — the hero is a static image and the "How" illustrations are
+   frozen. All hover/reveal motion is disabled under `prefers-reduced-motion`.
 
 ---
 
@@ -178,24 +181,31 @@ one step. `:active` collapses it (`2px`). Gives a tactile "physical button" pres
 
 ## 6. "How it works" — hand-built illustrations
 
-The **hero** uses captured `webm`/`mp4` footage (`muted loop playsinline`, poster SVG, plays
-only while on screen via `IntersectionObserver`; nothing autoplays under
-`prefers-reduced-motion`). The **three "How" feature cards no longer use video** — each holds a
-hand-built static HTML/CSS/SVG illustration (`.ill`, `16/11`) inside a flat `.win`, drawn in the
-warm-paper / neo-brutalist theme so it reads as finished product art.
+The **hero** uses a captured product **still** (`media/og.png`) inside a flat `.win` window — no
+video element, nothing to autoplay. The **three "How" feature cards likewise use no video** —
+each holds a hand-built static HTML/CSS/SVG illustration (`.ill`, `16/11`) inside a flat `.win`,
+drawn in the warm-paper / neo-brutalist theme so it reads as finished product art. The whole page
+is now still: the envelope and GOD packets are placed at fixed `offset-distance` points, not animated.
 
 | Slot | Illustration | Panel tint | Accent |
 |---|---|---|---|
-| Hero — the floor | captured footage `media/hero.webm` (1600×966) | — (live badge) | — |
-| 01 The Simulation | desk-grid floor: ink-bordered agent node chips (`.nodet`), SVG `.edge` links, an animated `✉️` traveling desk→desk | `--sky-soft` | `--sky` status dots |
+| Hero — the floor | static product still `media/og.png` | — | — |
+| 01 The Simulation | desk-grid floor: ink-bordered agent node chips (`.nodet`), SVG `.edge` links, a static `✉️` placed mid-route desk→desk | `--sky-soft` | `--sky` status dots |
 | 02 The Memory — MemPalace | radial recall: central maroon `.mem-core`, six `.mem-chip` memories on SVG `.mem-edge` spokes, matched ones highlighted (`.hit`, `--lilac` + maroon edge) | `--lilac` | `--maroon` |
-| 03 The Orchestration — GOD + hive | node graph: a `GOD · you` node routing to research/build/review along edges with flowing maroon `.flow-dot`s, plus an `.ap` approvals card (`approve`/`hold`) | `--peach` | `--yellow` GOD, `--mint` approve |
+| 03 The Orchestration — GOD + hive | node graph: a `GOD · you` node routing to research/build/review along edges with static maroon `.flow-dot` packets frozen mid-route, plus an `.ap` approvals card (`approve`/`hold`) | `--peach` | `--yellow` GOD, `--mint` approve |
 
-**Illustration primitives:** `.nodet` (ink-bordered mono node chip + colored `.av` swatch +
-status dot), `.mem-core` / `.mem-chip` (palace + memory tiles), `.ap` (approvals card), `.lbl`
-(mono caption), and SVG `.edge` / `.mem-edge` connectors. Motion is one or two looping CSS
-`offset-path` flows (the envelope, the GOD flow dots), all disabled under
-`prefers-reduced-motion`. No external images, no video weight — the whole section is pure markup.
+**One shared primitive set across all three illustrations** (this is what makes them read as a
+family): a faint dotted-paper grid behind every `.ill`; a single white, ink-bordered, offset-
+shadowed node chip `.node` (with a `.av` color swatch + optional status `.dot`); a larger `.node.hub`
+variant for the center (GOD / MemPalace — identical form, themed swatch); SVG `.edge` connectors
+(`.edge.on` = maroon "active flow"); plus `.ap` (approvals card) and `.lbl` (caption tag) drawn in
+the same ink-bordered, offset-shadowed idiom. Nothing animates — the envelope and GOD packets sit
+at fixed `offset-distance` points. No external images, no video weight — pure markup.
+
+The three illustrations stay **distinct in layout** so 01 and 03 don't collide: 01 is a flat
+**peer floor** (scattered desks, criss-cross messages, an envelope in transit, status dots), 02 is
+a **radial recall** (central MemPalace hub, six memory chips on spokes, recalled ones highlighted),
+03 is a **top-down hub** (GOD routing down to research/build/review with packets + an approvals card).
 
 The retired `media/how-*.{webm,mp4}` footage stays on disk but is no longer referenced.
 
@@ -208,8 +218,9 @@ The retired `media/how-*.{webm,mp4}` footage stays on disk but is no longer refe
 - **Nav:** sticky, `--paper`, transparent → 2px ink bottom-border on scroll. Maroon square `MD`
   mark + mono wordmark left; mono links center (hidden < 880px); ghost `★ Star` + yellow
   `⤓ Download` right.
-- **Hero:** centered chip + mono H1 (**"Local Multi-Agent Harness"**, one word in sky) + lead +
-  CTA row + trust line, then the `hero.webm` window directly below the CTA, over a dotted paper grid.
+- **Hero:** centered chip + mono H1 (**"Agents that build *while you do your thing.*"**, the
+  second line in sky) + lead + CTA row + trust line, then a static product still (`media/og.png`)
+  inside the `.win` window directly below the CTA, over a dotted paper grid.
 - **Bands:** alternate `--paper` / `--cream` / `--cream-2`, each separated by 2px ink borders.
 - **Claude:** an **integrations grid** (Claude Code · MCP · Skills · Hooks · Your plan) + two eco cards (one with the remote-control terminal).
 - **Final CTA (dark):** full-width `--ink-band` band with white dotted texture, big mono headline
