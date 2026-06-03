@@ -125,9 +125,10 @@ addressed to the human (or flags it as needing human attention), and the harness
 cap it at $5" — and that note is relayed back to the agent that asked, as a message from the human.
 The agent picks up where it left off with your guidance in hand.
 
-Everything not on the critical list stays autonomous. This selective escalation is the entire reason a
-hive can run for a long stretch without babysitting: it interrupts you precisely when it should, and
-never otherwise. It's also the model's primary safety rail — the policy is the control surface, so you
+Everything not on the critical list stays autonomous. This selective escalation —
+[human-in-the-loop done right](/blog/human-in-the-loop-ai-agents/) — is the entire reason a hive can
+run for a long stretch without babysitting: it interrupts you precisely when it should, and never
+otherwise. It's also the model's primary safety rail — the policy is the control surface, so you
 tighten or loosen it by editing the prompt.
 
 ## How a single request travels
@@ -173,6 +174,6 @@ another `claude` process — a special one.
 
 ---
 
-Munder Difflin's GOD orchestrator routes, adjudicates, and escalates for a whole hive of Claude Code
+Munder Difflin's [GOD orchestrator](https://munderdiffl.in/#how) routes, adjudicates, and escalates for a whole hive of Claude Code
 agents — on your own machine, with a full audit trail. [Download Munder Difflin](https://munderdiffl.in/#install)
 to put one in charge of your floor; it's free and open source.

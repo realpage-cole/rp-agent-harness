@@ -119,8 +119,9 @@ interactive input.
 
 Here's the part that turns a workaround into an asset. Once one process owns every commit, the repo
 stops being a liability and becomes a **serialized history of everything the team did**. Each routed
-message, each task assignment, each memory update lands as its own commit, in order. When a multi-agent
-run goes sideways, you don't guess — you read the log.
+message, each task assignment, each memory update lands as its own commit, in order — a natural
+companion to the [append-only event log](/blog/append-only-event-log-agents/) the hive also keeps. When
+a multi-agent run goes sideways, you don't guess — you read the history.
 
 That pairs naturally with the messaging layer: agents coordinate through files (see
 [atomic file mailboxes](/blog/atomic-file-mailboxes-for-agents/)), and the single committer commits
@@ -159,7 +160,7 @@ age-based cleanup, not just retries.
 
 ---
 
-Munder Difflin uses the single-committer pattern for its entire coordination layer: agents write
+Munder Difflin uses the single-committer pattern across the [multi-agent harness](https://munderdiffl.in/#what): agents write
 files, one process commits with retry and stale-lock recovery, and the repo stays a clean audit log.
 [Download Munder Difflin](https://munderdiffl.in/#install) to run a hive of Claude Code agents that
 never corrupt their own state; it's free and open source.

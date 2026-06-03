@@ -132,7 +132,8 @@ Pick based on how *interdependent* your parallel work is:
 If you've ever wondered whether built-in mechanisms are enough versus an external coordination layer,
 the same question shows up for [subagents vs a harness](/blog/claude-code-subagents-vs-multi-agent-harness/) —
 and the answer rhymes: native primitives handle the small scale; a coordination layer handles the team
-scale.
+scale. For a concrete tool-vs-tool take on that coordination layer, see
+[Claude Squad vs Munder Difflin](/blog/claude-squad-vs-munder-difflin/).
 
 ## FAQ
 
@@ -147,7 +148,7 @@ not just isolation — is the thing you're missing.
 
 ---
 
-Munder Difflin is the coordination layer: shared memory, messaging, and a GOD orchestrator for a hive
+Munder Difflin is [the coordination layer](https://munderdiffl.in/#how): shared memory, messaging, and a GOD orchestrator for a hive
 of Claude Code agents — and it plays nicely with the git workflow you already use.
 [Download Munder Difflin](https://munderdiffl.in/#install) when isolation isn't enough and you need a
 team; it's free and open source.

@@ -94,8 +94,10 @@ escalate to a human queue instead of executing. A good default critical list:
 - **conflicts** the team can't resolve.
 
 In a hive, the [orchestrator](/blog/how-the-god-orchestrator-works/) enforces this: routine decisions
-it makes itself, critical ones it routes to an approvals queue. You come back in the morning to a short
-list of "I needed your call on these," not a pile of irreversible actions.
+it makes itself, critical ones it routes to an approvals queue — the
+[human-in-the-loop approvals](/blog/human-in-the-loop-ai-agents/) that keep an overnight run safe. You
+come back in the morning to a short list of "I needed your call on these," not a pile of irreversible
+actions.
 
 ### Bounded scope
 
@@ -144,7 +146,7 @@ goals concrete and the guardrails tight, and the overnight shift earns its keep.
 
 ---
 
-Munder Difflin gives you the whole kit: an autonomous Stop-hook loop, an auto mode that skips routine
+Munder Difflin gives you [everything an overnight hive needs](https://munderdiffl.in/#why): an autonomous Stop-hook loop, an auto mode that skips routine
 approvals, an orchestrator that escalates only the critical few, and a git audit log of the night.
 [Download Munder Difflin](https://munderdiffl.in/#install) to let a hive of Claude Code agents build
 while you sleep; it's free and open source.

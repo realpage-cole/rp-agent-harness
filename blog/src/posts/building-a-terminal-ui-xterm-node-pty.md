@@ -202,7 +202,9 @@ A pool keeps correctness; a few habits keep it fast:
   sessions, not a leak.
 
 The deeper performance story — rendering backends, batching writes, and keeping CPU flat with many
-streaming PTYs — is its own topic, but the pool is the structural decision everything else builds on.
+streaming PTYs — gets its own deep dive in
+[rendering many live terminals without melting the CPU](/blog/rendering-many-live-terminals-performance/),
+but the pool is the structural decision everything else builds on.
 
 ## Why a harness needs all of this
 

@@ -80,8 +80,9 @@ There's also an architectural reason. Heavyweight memory frameworks tend to want
 runtime* — they assume they're the thing running the loop. But when your agents are real `claude`
 sessions, the runtime is already Claude Code. The memory layer should be a lightweight companion to
 that, not a replacement for it. Markdown files plus a CLI-driven index fit that shape; a framework that
-wants to be in charge doesn't. (For the deeper case, see
-[how to give Claude Code long-term memory](/blog/give-claude-code-long-term-memory/).)
+wants to be in charge doesn't. (For the full argument, see
+[why we built agent memory markdown-first](/blog/markdown-first-agent-memory/); for the plain-English
+version, [how to give Claude Code long-term memory](/blog/give-claude-code-long-term-memory/).)
 
 ## The shape of a shared memory layer
 
@@ -163,7 +164,8 @@ it fuzzy.
 
 ---
 
-Munder Difflin gives every Claude Code agent markdown memory plus a shared semantic palace the whole
-hive can recall from — local, fast, and graceful when offline.
+Munder Difflin gives every Claude Code agent markdown memory plus
+[a shared semantic palace the whole hive can recall from](https://munderdiffl.in/#how) — local, fast,
+and graceful when offline.
 [Download Munder Difflin](https://munderdiffl.in/#install) to give your agents memory that actually
 sticks; it's free and open source.

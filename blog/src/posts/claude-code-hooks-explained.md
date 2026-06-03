@@ -134,7 +134,8 @@ flags and environment variables.
 Every tool event the harness receives is forwarded to the UI. That's what drives the office floor: when
 an agent calls a file tool, its avatar walks to the right station; when it runs a command, it moves to
 a terminal. Because the events are structured and come straight from Claude, the visualization reflects
-*real* activity rather than a scripted animation or fragile log-scraping.
+*real* activity rather than a scripted animation or fragile log-scraping — and it pairs with each
+agent's actual live terminal, [streamed without melting the CPU](/blog/rendering-many-live-terminals-performance/).
 
 ### Stop → the autonomous loop
 
@@ -179,7 +180,7 @@ elsewhere.
 
 ---
 
-Munder Difflin turns Claude Code's hook lifecycle into a live, autonomous office: real-time avatars
+Munder Difflin turns Claude Code's hook lifecycle into [a live, autonomous office](https://munderdiffl.in/#how): real-time avatars
 from tool events and a self-draining work loop from the Stop hook — all without editing your repo.
 [Download Munder Difflin](https://munderdiffl.in/#install) to see hooks driving a hive of agents; it's
 free and open source.
