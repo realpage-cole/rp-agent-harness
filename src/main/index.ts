@@ -15,6 +15,7 @@ import { HiveManager, type AgentMeta, type HiveMessage } from './hive';
 import { HookServer } from './hooks';
 import { MemoryManager } from './memory';
 import { enrichMessage } from './assistant';
+import { listIssues } from './github';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const ptyManager = new PtyManager();
@@ -301,6 +302,11 @@ ipcMain.handle('app:resetAll', () => {
   app.relaunch();
   app.exit(0);
 });
+
+// ─── IPC: GitHub issue ingestion (gh CLI) ────────────────────────────────────
+ipcMain.handle('github:issues', (_evt, cwd: unknown) =>
+  typeof cwd === 'string' ? listIssues(cwd) : { ok: false, error: 'no cwd' }
+);
 
 app.whenReady().then(() => {
   // Bootstrap the hive (if harnessHome is configured) and start the message router.
