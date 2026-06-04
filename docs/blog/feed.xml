@@ -112,6 +112,14 @@
     <summary>The discipline that makes an autonomous coding agent trustworthy: prove every claim, reproduce the green, and check the fix — not just the intent.</summary>
   </entry>
   <entry>
+    <title>Approving AI Agents: Human-in-the-Loop Without a Queue</title>
+    <link href="https://munderdiffl.in/blog/human-in-the-loop-approving-ai-agents/" />
+    <id>https://munderdiffl.in/blog/human-in-the-loop-approving-ai-agents/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
+    <summary>How to approve what AI agents do without a parallel approval queue: native permission prompts, routing &#39;to: human&#39; to the orchestrator, remote approval.</summary>
+  </entry>
+  <entry>
     <title>Keep Your Agent&#39;s Semantic Memory Clean: Don&#39;t Index the Config</title>
     <link href="https://munderdiffl.in/blog/keep-agent-semantic-memory-clean/" />
     <id>https://munderdiffl.in/blog/keep-agent-semantic-memory-clean/</id>
