@@ -96,6 +96,16 @@ export interface GitCommit {
 export interface GitStatusEntry { path: string; index: string; worktree: string }
 export interface GitStatus { staged: GitStatusEntry[]; unstaged: GitStatusEntry[]; untracked: string[] }
 
+/** A GitHub issue, normalized for the renderer (labels/assignees flattened to names). */
+export interface GHIssue {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  labels: string[];
+  assignees: string[];
+}
+
 const api = {
   version: '0.1.0',
 
@@ -219,7 +229,13 @@ const api = {
   // ─── Reset ─────────────────────────────────────────────────────────────────
   /** Wipe all hive data + the memory palace, reset config, and relaunch the app
    *  into onboarding. The process exits, so this promise never resolves. */
-  resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll')
+  resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll'),
+
+  // ─── GitHub issue ingestion (gh CLI) ───────────────────────────────────────
+  /** List up to 30 open issues in the repo at `cwd` via the `gh` CLI. Returns
+   *  `{ ok: false, error }` if `gh` is missing/unauthenticated or `cwd` isn't a repo. */
+  githubIssues: (cwd: string): Promise<{ ok: boolean; issues?: GHIssue[]; error?: string }> =>
+    ipcRenderer.invoke('github:issues', cwd)
 };
 
 contextBridge.exposeInMainWorld('cth', api);
