@@ -65,6 +65,7 @@ export interface HarnessConfig {
   defaultModel?: string;
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
+  notifications?: boolean;
 }
 
 export interface MemoryStatus {
@@ -219,7 +220,12 @@ const api = {
   // ─── Reset ─────────────────────────────────────────────────────────────────
   /** Wipe all hive data + the memory palace, reset config, and relaunch the app
    *  into onboarding. The process exits, so this promise never resolves. */
-  resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll')
+  resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll'),
+
+  // ─── Desktop notifications ───────────────────────────────────────────────────
+  /** Toggle native desktop notifications for agent lifecycle events. */
+  setNotifications: (v: boolean): Promise<HarnessConfig> =>
+    ipcRenderer.invoke('app:setNotifications', v)
 };
 
 contextBridge.exposeInMainWorld('cth', api);
