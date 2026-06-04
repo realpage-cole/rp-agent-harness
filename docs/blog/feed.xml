@@ -16,6 +16,14 @@
     <summary>Install Munder Difflin on macOS, Windows, or Linux and put a hive of Claude Code agents to work on ambitious, long-horizon tasks — start to finish.</summary>
   </entry>
   <entry>
+    <title>Running AI Agents Safely: Permission Modes and Sandboxing</title>
+    <link href="https://munderdiffl.in/blog/agent-security-and-sandboxing/" />
+    <id>https://munderdiffl.in/blog/agent-security-and-sandboxing/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
+    <summary>How to run autonomous AI agents safely: permission modes and the bypassPermissions foot-gun, workspace isolation, and what to gate vs. allow.</summary>
+  </entry>
+  <entry>
     <title>Munder Difflin&#39;s Architecture: Two Data Planes, One Renderer</title>
     <link href="https://munderdiffl.in/blog/architecture-two-planes-one-renderer/" />
     <id>https://munderdiffl.in/blog/architecture-two-planes-one-renderer/</id>
@@ -30,6 +38,14 @@
     <published>2026-06-04T00:00:00.000Z</published>
     <updated>2026-06-04T00:00:00.000Z</updated><category term="Comparisons" />
     <summary>An honest 2026 roundup of tools to run multiple Claude Code agents — Claude Squad, Conductor, Crystal, vibe-kanban, and Munder Difflin — compared.</summary>
+  </entry>
+  <entry>
+    <title>Building Reliable AI Agents: Failure Is the Default</title>
+    <link href="https://munderdiffl.in/blog/building-reliable-ai-agents/" />
+    <id>https://munderdiffl.in/blog/building-reliable-ai-agents/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
+    <summary>Agents fail constantly: tools error, steps stall, output goes wrong. Reliability isn&#39;t avoiding failure — it&#39;s making each one contained and recoverable.</summary>
   </entry>
   <entry>
     <title>Can Claude Code Agents Talk to Each Other?</title>
@@ -168,12 +184,36 @@
     <summary>How scheduled missions make a Claude Code hive work on a cadence — recurring requests that fire on an interval and land in an agent&#39;s queue, hands-free.</summary>
   </entry>
   <entry>
+    <title>Security for AI Coding Agents: A Practical Guide</title>
+    <link href="https://munderdiffl.in/blog/security-for-ai-coding-agents/" />
+    <id>https://munderdiffl.in/blog/security-for-ai-coding-agents/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
+    <summary>How to run AI coding agents safely: contain the blast radius, scope every task, treat agent input as untrusted, and gate the irreversible behind a human.</summary>
+  </entry>
+  <entry>
     <title>A Small-Team Playbook for AI Coding Agents</title>
     <link href="https://munderdiffl.in/blog/small-team-ai-agents-playbook/" />
     <id>https://munderdiffl.in/blog/small-team-ai-agents-playbook/</id>
     <published>2026-06-04T00:00:00.000Z</published>
     <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
     <summary>How a small team adopts a hive of AI coding agents without chaos — the roles to assign, the cadence to run, and the guardrails that keep it safe.</summary>
+  </entry>
+  <entry>
+    <title>The Office Parody Behind Munder Difflin (and Why It Helps)</title>
+    <link href="https://munderdiffl.in/blog/the-office-parody-behind-munder-difflin/" />
+    <id>https://munderdiffl.in/blog/the-office-parody-behind-munder-difflin/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Story" />
+    <summary>Why Munder Difflin is a loving parody of The Office — and how the office metaphor makes a hive of AI agents genuinely easier to understand and trust.</summary>
+  </entry>
+  <entry>
+    <title>Trigger Your AI Agent Hive from Slack</title>
+    <link href="https://munderdiffl.in/blog/trigger-ai-agents-from-slack/" />
+    <id>https://munderdiffl.in/blog/trigger-ai-agents-from-slack/</id>
+    <published>2026-06-04T00:00:00.000Z</published>
+    <updated>2026-06-04T00:00:00.000Z</updated><category term="Guides" />
+    <summary>Trigger an AI agent hive from Slack: a local webhook verifies each message and drops it into your orchestrator&#39;s queue as a task — no server to host.</summary>
   </entry>
   <entry>
     <title>AEO for Dev Tools: Getting Cited by ChatGPT and Claude</title>
@@ -446,21 +486,5 @@
     <published>2026-05-24T00:00:00.000Z</published>
     <updated>2026-05-24T00:00:00.000Z</updated><category term="Guides" />
     <summary>A from-zero Claude Code multi-agent setup: install Munder Difflin, onboard, spawn a few agents, and watch the GOD orchestrator route your first task.</summary>
-  </entry>
-  <entry>
-    <title>Claude Code Subagents vs a Multi-Agent Harness</title>
-    <link href="https://munderdiffl.in/blog/claude-code-subagents-vs-multi-agent-harness/" />
-    <id>https://munderdiffl.in/blog/claude-code-subagents-vs-multi-agent-harness/</id>
-    <published>2026-05-23T00:00:00.000Z</published>
-    <updated>2026-05-23T00:00:00.000Z</updated><category term="Guides" />
-    <summary>Claude Code subagents vs a multi-agent harness: where subagents stop and a harness with shared memory, messaging, and an orchestrator takes over.</summary>
-  </entry>
-  <entry>
-    <title>What Is a Multi-Agent Harness? (Plain-English Guide)</title>
-    <link href="https://munderdiffl.in/blog/what-is-a-multi-agent-harness/" />
-    <id>https://munderdiffl.in/blog/what-is-a-multi-agent-harness/</id>
-    <published>2026-05-22T00:00:00.000Z</published>
-    <updated>2026-05-22T00:00:00.000Z</updated><category term="Concepts" />
-    <summary>A multi-agent harness coordinates several AI coding agents into one team — here&#39;s what that means, and how it differs from a single agent or a framework.</summary>
   </entry>
 </feed>
