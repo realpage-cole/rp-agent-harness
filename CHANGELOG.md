@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-04
+
+### Added
+- **Per-agent git worktrees.** A 'Git isolation' toggle in Add Agent auto-provisions a dedicated worktree (`<harnessHome>/worktrees/<agentId>/`) on spawn and tears it down on kill. Agents on the same repo never collide on branches.
+- **Task kanban with dependencies.** A Tasks tab in the Command Center renders a full kanban board (todo / doing / blocked / done). Each task carries an assignee, a `dependsOn[]` list, priority, and description — and persists in `hive/tasks.json` via a new `hive:writeTasks` IPC channel.
+- **Scheduled missions.** A Schedules section in the Floor tab lets you define recurring auto-dispatch missions (label, interval, target agent, body). The main process fires each on a `setInterval`, stamps `lastFiredAt`, and persists the list in config.
+- **Real token & cost telemetry.** The Activity tab reads `~/.claude/projects/` JSONL transcripts — the same files Claude Code writes — and displays actual input/output/cache token counts and estimated USD cost per agent per model. No more proxy tool-call counts.
+- **Global hive text search.** Full-text search across `board.md`, `tasks.json`, and all agent `memory.md` files, available in the Memory tab alongside MemPalace semantic search.
+- **Threaded chat.** A Messages tab in each agent's sidebar renders every hive message grouped by conversation with full reply chains and an inline reply form.
+- **Memory graph.** A visual graph in the Command Center Memory tab maps agents and their knowledge relationships.
+- **GitHub issue ingestion.** An Issues section in the Floor tab pulls open issues from any registered repo via `gh issue list` and lets you assign them to any agent with one click.
+- **CI status watcher.** A CI Status section in the Activity tab polls `gh run list` for every registered repo and shows live pass/fail/in-progress status for GitHub Actions runs.
+- **Desktop notifications.** Native OS notifications fire when an agent finishes a task or is waiting for your input. Toggle in Settings.
+- **Agent archival.** Closing an agent's tab archives it (memory + history intact) rather than deleting it permanently.
+
+### Fixed
+- Scheduler now honors `lastFiredAt` on config reload — missions don't double-fire after a save.
+- PTY lifecycle teardown runs on natural process exit as well as explicit kill, so worktrees are cleaned up reliably.
+- Task IDs fall back to a stable UUID when the title is empty; `writeTasks` IPC validates its input.
+
 ## [0.1.5] — 2026-06-04
 
 ### Added

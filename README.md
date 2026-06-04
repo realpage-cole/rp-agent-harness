@@ -15,7 +15,7 @@ you talk to, and visualized as avatars at work on a shared office floor.
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
   <img alt="Status: prototype" src="https://img.shields.io/badge/status-working%20prototype-F4F1EA.svg?style=flat-square&labelColor=6E1423">
-  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-F4F1EA.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Platform: macOS | Windows | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-F4F1EA.svg?style=flat-square&labelColor=6E1423">
   <a href="./CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
 </p>
 
@@ -103,12 +103,19 @@ terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
 | **Approvals & memory panels** | Human-in-the-loop approval queue for escalations; a memory search panel over the shared palace. |
 | **Onboarding wizard** | First-run setup: harness home, registered repos, default command, auto-mode. |
 | **Design system** | Fully tokenized SNES / Animal-Crossing aesthetic — pixel panels, buttons, badges, hand-drawn icons. See [`DESIGN.md`](./DESIGN.md). |
+| **Command Center** | Michael's control surface: Terminal, Floor (roster + dispatch + per-agent model selector), Memory (MemPalace + text search + memory graph), Activity (log + board + real token telemetry + CI watcher), Tasks (kanban board with dependencies + status tracking), Schedules (recurring missions). |
+| **Per-agent git worktrees** | 'Git isolation' toggle in Add Agent auto-provisions a dedicated worktree per agent on spawn and tears it down on kill — agents never collide on branches. |
+| **Token & cost telemetry** | Activity tab reads `~/.claude/projects/` JSONL transcripts and surfaces real token counts + estimated USD cost per agent per session. |
+| **Task kanban** | Dependency-aware kanban board in the Command Center Tasks tab — assign tasks to agents, track status across todo/doing/blocked/done, wire dependencies so work starts in order. |
+| **Scheduled missions** | Recurring auto-dispatch missions with label, interval, target agent, and body — the harness fires them on a timer so the floor keeps running without a human prompt. |
+| **GitHub ingestion** | Pull open issues from any registered repo via the `gh` CLI and assign them to agents with one click from the Command Center. |
+| **CI status watcher** | Live pass/fail/in-progress status for GitHub Actions runs, visible in the Activity tab for every registered repo. |
+| **Threaded chat** | Every hive message is grouped by conversation and rendered as a reply chain in each agent's Messages tab — readable, replyable, auditable. |
+| **Desktop notifications** | Native OS notifications when an agent finishes a task or is waiting for your input. |
+| **Agent archival** | Closing an agent tab archives it (memory + history preserved) rather than destroying it. |
 
-> [!IMPORTANT]
-> **Status: working prototype.** The Electron shell, office floor, real PTY terminals, the hive
-> (memory/mailbox/router/GOD agent), and the file/git tooling are functional. Wiring avatar movement
-> fully to real Claude Code tool events is the headline next milestone (today it falls back to a
-> synthetic event loop where hooks aren't attached).
+> [!NOTE]
+> **Status: v0.2.0 — full-featured local harness.** The hook plane, office floor, hive coordination, git isolation, token telemetry, task kanban, scheduled missions, GitHub/CI integration, threaded conversations, desktop notifications, and agent archival are all functional and shipping. macOS (signed), Windows, and Linux builds are available on the releases page.
 
 ## Getting started
 
@@ -194,12 +201,20 @@ src/
     hooks.ts                 UDS hook server + cth-hook shim + Stop-loop
     memory.ts                semantic memory layer (CLI wrapper, degrade-to-noop)
     config.ts                harness config persistence + home setup
+    transcript.ts            reads ~/.claude/projects/ JSONL transcripts for real token/cost telemetry
+    github.ts                GitHub issue + CI run ingestion via the gh CLI
+    assistant.ts             headless Sonnet enrichment pipeline (Dwight)
+    shellEnv.ts              resolve PATH and shell env for child processes
     fs.ts / git.ts           sandboxed filesystem + git bridges
   preload/                   contextBridge → typed window.cth API
   renderer/src/
     App.tsx                  top-level layout + wiring
     design/                  tokens.css / tokens.ts / global.css (design source of truth)
     components/              PixelPanel, AgentDetailPanel, CommandBar, ApprovalsPanel, MemoryPanel, …
+    CommandCenterPanel,      Michael's control surface (Terminal/Floor/Memory/Activity/Tasks/Schedules/Handbook tabs)
+    TasksKanban,             dependency-aware kanban board (Tasks tab)
+    ThreadsPanel,            hive message conversation viewer (Messages tab)
+    MessageQueueComposer,    park messages for a busy agent + enrich toggle
     scene/office/            Pixi office floor: OfficeFloor, Character, Camera, cast, pathfinding, …
     store/ · hooks/          zustand store, event loop, PTY parser, typewriter
     assets/                  tilesets, maps, character sheets (see ATTRIBUTION.md)
@@ -218,12 +233,11 @@ chrome. The 15 avatars are the cast of *The Office*, differentiated by hair/skin
 
 ## Roadmap
 
-- [ ] **Full real event plane** — every avatar move driven by Claude Code hook events.
-- [ ] **Add-agent flow** — command picker + per-project hook-install consent.
-- [ ] **Config drawer** — per-agent goal, model, permission mode, skills, MCP.
-- [ ] **Memory reflection** — summarize/bound per-agent `memory.md` over time.
-- [ ] **Persistence** — durable agents/layout/command history (SQLite).
-- [ ] **Packaging** — signed `.dmg`; revisit Linux/Windows later.
+- [ ] **Heartbeat cron** — periodic context-aware check-in with Michael: reads live hive state (agent statuses, task ledger, recent log), builds a digest, and prompts him to re-engage if the floor goes quiet.
+- [ ] **Scheduled heartbeat UI** — surface the heartbeat interval and last-fired time in the Schedules section alongside regular missions.
+- [ ] **Memory reflection** — summarize and bound per-agent `memory.md` over time to prevent unbounded growth.
+- [ ] **Persistence** — durable agents/layout/command history across restarts (SQLite or similar).
+- [ ] **Fully wired avatar movement** — every avatar station visit and tool-bubble driven 100% by real Claude Code hook events (today it mixes real hooks with a synthetic fallback loop).
 
 ## Contributing
 
