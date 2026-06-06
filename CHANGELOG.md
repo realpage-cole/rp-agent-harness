@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-06-06
+
+### Added
+- **Hourly ops standup.** A built-in scheduled mission (enabled by default) where the GOD orchestrator reviews every agent — who's doing what, whether tasks are on track, and whether agents are still running — and **compacts each terminal's context** on the same hourly cadence to keep agents lean. Toggle it in the Command Center; a one-time migration seeds it into existing installs (and won't re-add it once deleted).
+
+### Fixed
+- **Agents exited on their own at a "Bypass Permissions mode" prompt.** Agents spawn with `--permission-mode bypassPermissions`, which on a fresh machine shows a one-time interactive "WARNING: Bypass Permissions mode … 1. No, exit / 2. Yes, I accept" prompt the terminal couldn't answer, so the agent exited code 1 within seconds. The harness now idempotently pre-accepts Claude Code's dangerous-mode warning (`skipDangerousModePermissionPrompt` / `skipAutoPermissionPrompt`) and per-folder trust before each spawn.
+- **Blog cards.** The colored thumbnail tile sat flush against each card's bold border; it's now inset with padding for breathing room (desktop + mobile).
+- **Windows: hook server + semantic memory.** The hook server now binds a named pipe on Windows (where Node IPC isn't a filesystem socket), and `mempalace` is detected via `where` + the standard `.exe` install locations so semantic memory works on Windows. POSIX behavior unchanged. (Thanks @Xileck — #4.)
+- **Palace mining writer-lock collisions.** Mining is now serialized — a single writer at a time with a re-entrancy guard — fixing "palace is held by PID …" failures when multiple agents mined concurrently. (Thanks @Xileck — #5.)
+- **MemPalace index noise.** Each agent's `.gitignore` is ensured before mining so `settings.json`, the cursor file, and raw inbox/outbox message JSON stay out of the semantic index — keeping recall and wake-up focused on real memory.
+
 ## [0.1.8] — 2026-06-05
 
 ### Fixed

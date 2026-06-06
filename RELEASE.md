@@ -1,4 +1,4 @@
-# Munder Difflin v0.1.8
+# Munder Difflin v0.1.9
 
 **A local hive of Claude Code agents that run themselves** — messaging, routing, and
 remembering, coordinated by a GOD orchestrator you talk to. Local-first and open source.
@@ -7,8 +7,12 @@ remembering, coordinated by a GOD orchestrator you talk to. Local-first and open
 
 ---
 
-## What's new in 0.1.8
-- Windows agent spawn fix — launching an agent on Windows failed with "cannot create process, error code: 2" (ENOENT) because binary/PATH resolution was Unix-only. Windows now finds `claude` via `where` and the standard install locations (`%APPDATA%\npm`, `%LOCALAPPDATA%\Programs\claude`, `%USERPROFILE%\.claude\local`) and uses the process PATH directly — no shell probe. macOS/Linux behavior is unchanged (with an added `~/.volta/bin` fallback).
+## What's new in 0.1.9
+- **Hourly ops standup** — a built-in scheduled mission where the GOD orchestrator reviews who's doing what and whether work is on track, and **compacts every terminal's context** each hour to keep agents lean. On by default; toggle it in the Command Center.
+- **Fixed: agents quitting on their own at a "Bypass Permissions" prompt** — on a fresh machine, agents hit a one-time interactive warning the terminal couldn't answer and exited within seconds. The harness now pre-accepts Claude Code's dangerous-mode warning before spawn.
+- **Windows fixes** — the hook server now uses a named pipe, and `mempalace` (semantic memory) is detected on Windows. POSIX behavior unchanged. (Thanks @Xileck)
+- **Palace mining hardened** — mining is serialized to avoid "palace is held by PID …" writer-lock collisions (thanks @Xileck), and a per-agent `.gitignore` keeps config/message noise out of the semantic index.
+- **Blog cards** — thumbnail tiles are no longer flush against the card border.
 
 See the [CHANGELOG](https://github.com/chaitanyagiri/munder-difflin/blob/main/CHANGELOG.md) for full detail.
 
@@ -22,22 +26,22 @@ Apple Silicon and Intel.
 ### 🍎 macOS
 | Build | File |
 |---|---|
-| Universal (Apple Silicon + Intel) | [`Munder-Difflin-0.1.8-mac-universal.dmg`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.8-mac-universal.dmg) |
+| Universal (Apple Silicon + Intel) | [`Munder-Difflin-0.1.9-mac-universal.dmg`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.9-mac-universal.dmg) |
 
 ### 🪟 Windows
 | Build | File |
 |---|---|
-| Installer (x64) — *recommended* | [`Munder-Difflin-0.1.8-win-x64-setup.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.8-win-x64-setup.exe) |
-| Portable (x64, no install) | [`Munder-Difflin-0.1.8-win-x64-portable.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.8-win-x64-portable.exe) |
+| Installer (x64) — *recommended* | [`Munder-Difflin-0.1.9-win-x64-setup.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.9-win-x64-setup.exe) |
+| Portable (x64, no install) | [`Munder-Difflin-0.1.9-win-x64-portable.exe`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.9-win-x64-portable.exe) |
 
 ### 🐧 Linux
 | Build | File |
 |---|---|
-| AppImage (x86_64) | [`Munder-Difflin-0.1.8-linux-x86_64.AppImage`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.8-linux-x86_64.AppImage) |
+| AppImage (x86_64) | [`Munder-Difflin-0.1.9-linux-x86_64.AppImage`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/Munder-Difflin-0.1.9-linux-x86_64.AppImage) |
 
 ### 📦 Source
-[Source code (zip)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.8.zip) ·
-[Source code (tar.gz)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.8.tar.gz)
+[Source code (zip)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.9.zip) ·
+[Source code (tar.gz)](https://github.com/chaitanyagiri/munder-difflin/archive/refs/tags/v0.1.9.tar.gz)
 
 > **Verify your download:** [`SHA256SUMS.txt`](https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/SHA256SUMS.txt) — then `shasum -a 256 -c SHA256SUMS.txt` (macOS/Linux) or `Get-FileHash` (Windows).
 
