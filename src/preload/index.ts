@@ -128,13 +128,62 @@ export interface GitStatusEntry { path: string; index: string; worktree: string 
 export interface GitStatus { staged: GitStatusEntry[]; unstaged: GitStatusEntry[]; untracked: string[] }
 
 /** Real token usage + estimated USD cost summed from an agent's Claude Code
- *  transcripts under ~/.claude/projects (Sonnet pricing). */
+ *  transcripts under ~/.claude/projects. Reconciler/fallback path — now priced
+ *  PER MODEL (not Sonnet-for-everyone). The live path uses AgentUsageSample. */
 export interface AgentUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   estimatedCostUsd: number;
+  /** Most-recently-seen model id (normalized), if any priced record was found. */
+  model?: string;
+}
+
+/** Live cumulative cost/token snapshot from the OTel collector (the locked
+ *  cross-lane seam). PII-free by construction. Mirrors telemetry.ts. */
+export interface AgentUsageSample {
+  agentId: string;
+  sessionId: string;
+  ts: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  model: string;
+  usd: number;
+}
+
+/** One tool invocation for the per-agent span waterfall (#7B.2). Ephemeral. */
+export interface ToolSpan {
+  agentId: string;
+  sessionId: string;
+  ts: number;
+  tool: string;
+  success: boolean;
+  durationMs: number;
+  decision?: 'accept' | 'reject';
+  error?: string;
+}
+
+/** Circuit-breaker state (Lane A #6 → this lane's avatars/meter). */
+export interface BreakerState {
+  agentId: string;
+  level: 'healthy' | 'steering' | 'constrained' | 'stopped';
+  reason: string;
+  ts: number;
+}
+
+/** Live telemetry push payload (channel `telemetry:event`). */
+export type TelemetryEvent =
+  | { kind: 'usage'; sample: AgentUsageSample }
+  | { kind: 'tool_result'; span: ToolSpan }
+  | { kind: 'api_error'; agentId: string; sessionId: string; ts: number; error: string };
+
+/** Cold-start backfill from the collector. */
+export interface TelemetrySnapshot {
+  usage: AgentUsageSample[];
+  spans: Record<string, ToolSpan[]>;
 }
 
 /** A GitHub issue, normalized for the renderer (labels/assignees flattened to names). */
@@ -279,9 +328,37 @@ const api = {
 
   // ─── Token telemetry (real usage + est. cost from CC transcripts) ──────────
   /** Sum input/output/cache tokens + estimated USD cost for an agent from its
-   *  Claude Code transcripts. Returns null for an invalid cwd. */
+   *  Claude Code transcripts (reconciler/fallback). Returns null for an invalid cwd. */
   agentUsage: (cwd: string): Promise<AgentUsage | null> =>
     ipcRenderer.invoke('hive:agentUsage', cwd),
+
+  // ─── Live telemetry (OTel collector — the usage-provider seam + spans) ──────
+  /** Live cumulative usage for an agent (OTel-preferred, transcript fallback). */
+  telemetryUsage: (agentId: string): Promise<AgentUsageSample | null> =>
+    ipcRenderer.invoke('telemetry:usage', agentId),
+  /** Recent tool spans for an agent's waterfall (#7B.2). */
+  telemetrySpans: (agentId: string): Promise<ToolSpan[]> =>
+    ipcRenderer.invoke('telemetry:spans', agentId),
+  /** Cold-start backfill of all agents' usage + recent spans. */
+  telemetrySnapshot: (): Promise<TelemetrySnapshot> =>
+    ipcRenderer.invoke('telemetry:snapshot'),
+  /** Subscribe to live telemetry pushes; returns an unsubscribe fn. */
+  onTelemetryEvent: (cb: (e: TelemetryEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: TelemetryEvent) => cb(payload);
+    ipcRenderer.on('telemetry:event', listener);
+    return () => ipcRenderer.removeListener('telemetry:event', listener);
+  },
+
+  // ─── Circuit breaker (Lane A #6 state → avatars/meter) ──────────────────────
+  /** Subscribe to breaker-state changes; returns an unsubscribe fn. */
+  onBreakerState: (cb: (s: BreakerState) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: BreakerState) => cb(payload);
+    ipcRenderer.on('control:breakerState', listener);
+    return () => ipcRenderer.removeListener('control:breakerState', listener);
+  },
+  /** Push a breaker state to the renderer (Lane A's policy / interim glue calls this). */
+  setBreakerState: (state: BreakerState): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('control:setBreakerState', state),
 
   // ─── Task kanban (hive/tasks.json) ───────────────────────────────────────
   /** Overwrite the hive task ledger with the full task list and commit it. */
