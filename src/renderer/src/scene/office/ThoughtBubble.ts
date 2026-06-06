@@ -19,7 +19,7 @@ const MAX_WIDTH = 150;
 const FILL_COLOR = colors.cream[50];   // light cloud
 const OUTLINE_COLOR = colors.ink[900];
 const TEXT_COLOR = '#3d2e4a';           // ink-700
-const FONT_SIZE = 11;
+const FONT_SIZE = 12;
 const RENDER_SCALE = 0.5;               // render at 2x, scale down for crispness
 const OFFSET_Y = -38;                   // a touch higher than the tool bubble
 const FADE_IN_DURATION = 0.15;
@@ -71,6 +71,7 @@ export class ThoughtBubble {
       text: '',
       style: {
         fontSize: FONT_SIZE,
+        fontWeight: 'bold',
         fill: TEXT_COLOR,
         fontFamily: 'monospace',
         align: 'left',

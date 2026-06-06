@@ -24,9 +24,9 @@ const PADDING_Y = 3;
 const CORNER_RADIUS = 4;
 const MAX_WIDTH = 140;
 const BG_COLOR = 0x1a1320; // ink-900
-const BG_ALPHA = 0.82;
+const BG_ALPHA = 0.95;     // near-opaque: thin text over a busy floor was hard to read
 const TEXT_COLOR = '#fffdf5';
-const FONT_SIZE = 10;
+const FONT_SIZE = 12;
 const RENDER_SCALE = 0.5; // render at 2x, scale down for crispness
 const OFFSET_Y = -36;
 const FADE_IN_DURATION = 0.15;
@@ -76,6 +76,7 @@ export class ToolBubble {
       text: '',
       style: {
         fontSize: FONT_SIZE,
+        fontWeight: 'bold',
         fill: TEXT_COLOR,
         fontFamily: 'monospace',
         align: 'left',
@@ -145,8 +146,12 @@ export class ToolBubble {
 
   setPosition(px: number, py: number): void {
     const halfBubble = (this.bgW * RENDER_SCALE) / 2;
-    this.container.x = px - halfBubble;
-    this.container.y = py + OFFSET_Y - this.bgH * RENDER_SCALE;
+    // Round: the avatar glides at sub-pixel steps every frame, and a bubble
+    // following it on fractional coordinates makes the half-scaled text
+    // resample differently each frame — visible as shimmering/flickering
+    // while the character walks. (ThoughtBubble already does this.)
+    this.container.x = Math.round(px - halfBubble);
+    this.container.y = Math.round(py + OFFSET_Y - this.bgH * RENDER_SCALE);
   }
 
   hide(): void {
