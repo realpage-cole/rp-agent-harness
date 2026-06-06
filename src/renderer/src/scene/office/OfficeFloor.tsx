@@ -658,7 +658,13 @@ export function OfficeFloor() {
       const onTick = (ticker: Ticker) => {
         const dt = ticker.deltaMS / 1000;
         camera.update(dt);
-        for (const rt of runtimes.values()) rt.character.update(dt);
+        // Thought clouds counter-scale against the camera so their text never
+        // renders below 1:1 screen size when the window/world shrinks.
+        const zoom = world.scale.x;
+        for (const rt of runtimes.values()) {
+          rt.character.setBubbleZoom(zoom);
+          rt.character.update(dt);
+        }
         updateCafeteria(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {

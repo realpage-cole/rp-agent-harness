@@ -319,6 +319,12 @@ export class Character {
     this.thoughtBubble.setLift(px);
   }
 
+  /** Forward the camera zoom so the thought cloud can counter-scale and keep
+   *  its on-screen text size when the window (and thus the world) shrinks. */
+  setBubbleZoom(z: number): void {
+    this.thoughtBubble.setZoom(z);
+  }
+
   setStatusGlyph(glyph: StatusGlyph): void {
     if (glyph === this.statusGlyph) return;
     this.statusGlyph = glyph;

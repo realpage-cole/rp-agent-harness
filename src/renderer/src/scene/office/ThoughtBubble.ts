@@ -53,6 +53,12 @@ export class ThoughtBubble {
   // Extra upward shift (px) applied on top of OFFSET_Y so two nearby bubbles can
   // stack instead of overlapping. Set each frame by the scene's overlap pass.
   private extraLift = 0;
+  // Current camera zoom. The bubble lives inside the zoomed world container, so
+  // when the window shrinks (fit-to-screen zoom < 1) the text used to scale
+  // down with the map and turn into ragged mush. Counter-scale so the bubble
+  // never renders below its designed 1:1 screen size; at zoom ≥ 1 it keeps
+  // scaling with the world as before.
+  private zoom = 1;
 
   constructor() {
     this.container = new Container();
@@ -128,10 +134,25 @@ export class ThoughtBubble {
     this.lingerElapsed = 0;
   }
 
+  /** Update for the camera zoom: keep the bubble's SCREEN size from dropping
+   *  below 1:1 by counter-scaling while the world is zoomed out. */
+  setZoom(z: number): void {
+    if (!(z > 0) || z === this.zoom) return;
+    this.zoom = z;
+    this.container.scale.set(this.compensation());
+  }
+
+  /** World-units multiplier that cancels a < 1 camera zoom (1 at zoom ≥ 1). */
+  private compensation(): number {
+    return 1 / Math.min(this.zoom, 1);
+  }
+
   setPosition(px: number, py: number): void {
-    const halfBubble = (this.bgW * RENDER_SCALE) / 2;
-    this.container.x = Math.round(px - halfBubble);
-    this.container.y = Math.round(py + OFFSET_Y - this.bgH * RENDER_SCALE - this.extraLift);
+    const comp = this.compensation();
+    const w = this.bgW * RENDER_SCALE * comp;
+    const h = this.bgH * RENDER_SCALE * comp;
+    this.container.x = Math.round(px - w / 2);
+    this.container.y = Math.round(py + OFFSET_Y - h - this.extraLift);
   }
 
   /** Extra upward shift (px), set by the scene's bubble-overlap pass. */
@@ -143,8 +164,9 @@ export class ThoughtBubble {
    *  null when hidden. Used by the scene to detect and resolve overlaps. */
   getLayout(px: number, py: number): { x: number; y: number; w: number; h: number } | null {
     if (this.state === 'hidden') return null;
-    const w = this.bgW * RENDER_SCALE;
-    const h = this.bgH * RENDER_SCALE;
+    const comp = this.compensation();
+    const w = this.bgW * RENDER_SCALE * comp;
+    const h = this.bgH * RENDER_SCALE * comp;
     return { x: px - w / 2, y: py + OFFSET_Y - h, w, h };
   }
 
