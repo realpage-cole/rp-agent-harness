@@ -6,7 +6,7 @@ import { CSSProperties } from 'react';
 export type IconName =
   | 'gear' | 'plus' | 'x' | 'check' | 'arrow-right' | 'pause' | 'play'
   | 'bell' | 'folder' | 'terminal' | 'code' | 'web' | 'mcp' | 'sparkle'
-  | 'expand' | 'minimize';
+  | 'clock' | 'expand' | 'minimize';
 
 interface IconDef {
   ink: string;     // primary color path d
@@ -41,6 +41,11 @@ const paths: Record<IconName, IconDef> = {
   pause: {
     accentColor: 'var(--cth-lemon)',
     ink:   'M4 3h3v10H4V3zm5 0h3v10H9V3z'
+  },
+  // Clock face: a ring (outer square minus inner hole, evenodd) with two hands.
+  clock: {
+    accentColor: 'var(--cth-sky)',
+    ink:   'M5 1h6v2h2v2h2v6h-2v2h-2v2H5v-2H3v-2H1V5h2V3h2V1zM5 3v2H3v6h2v2h6v-2h2V5h-2V3H5zM7 5h2v3h2v2H7V5z'
   },
   play: {
     accentColor: 'var(--cth-mint)',

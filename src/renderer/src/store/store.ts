@@ -115,6 +115,10 @@ interface State {
   selectedId: string | null;
   feeds: Record<string, string[]>;
   addAgentOpen: boolean;
+  /** One-shot request to switch the Command Center to a tab (e.g. the boss-room
+   *  calendar → 'schedules'). seq-keyed so a repeat click re-fires. */
+  ccTabRequest: { tab: string; seq: number } | null;
+  requestCommandCenterTab: (tab: string) => void;
   fullscreenAgentId: string | null;
   fullscreenFilePath: string | null;
   sidebarWidth: number;
@@ -348,6 +352,9 @@ export const useStore = create<State>((set) => ({
   selectedId: initialSelectedId,
   feeds: {},
   addAgentOpen: false,
+  ccTabRequest: null,
+  requestCommandCenterTab: (tab) =>
+    set((s) => ({ ccTabRequest: { tab, seq: (s.ccTabRequest?.seq ?? 0) + 1 } })),
   fullscreenAgentId: null,
   fullscreenFilePath: null,
   sidebarWidth: initialSidebarWidth,
