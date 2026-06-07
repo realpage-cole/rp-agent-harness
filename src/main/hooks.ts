@@ -24,6 +24,8 @@ interface HookPayload {
   agent_id?: string | null;
   session_id?: string;
   transcript_path?: string;
+  /** Status-line payloads only: the session's live context accounting. */
+  context_window?: { total_input_tokens?: number; context_window_size?: number };
   cwd?: string;
   tool_name?: string;
   tool_input?: unknown;
@@ -95,6 +97,25 @@ export class HookServer {
     const event = p.hook_event_name ?? 'Unknown';
     if (agentId && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
+    }
+
+    // Status-line payloads carry the session's EXACT context accounting —
+    // current tokens AND the real window size (200k vs 1M, which nothing else
+    // exposes). Forward to the renderer for the agent-card context gauge.
+    // Handled FIRST and returned early: this is pure telemetry from the
+    // statusLine shim, not a real hook boundary — it must never trip the
+    // HALT gate or feed the breaker's loop detector below.
+    if (event === 'Status') {
+      const cw = p.context_window;
+      if (agentId && cw && typeof cw.total_input_tokens === 'number'
+        && typeof cw.context_window_size === 'number' && cw.context_window_size > 0) {
+        this.getWebContents()?.send('hive:contextUpdate', {
+          agentId,
+          tokens: cw.total_input_tokens,
+          limit: cw.context_window_size
+        });
+      }
+      return {};
     }
 
     // 7C.3 — a graceful operator HALT overrides everything (incl. the inbox

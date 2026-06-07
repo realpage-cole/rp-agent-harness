@@ -36,6 +36,12 @@ const BLOCK_HINTS = [
   /\[y\/n\]/i,
 ];
 
+// The /context output prints "235.3k/1m tokens (24%)" — sniff the DENOMINATOR
+// to learn the session's true context-window size. This is the only reliable
+// source for sessions on the CLI-default model: the "[1m]" alias exists only
+// inside Claude Code; the API model id in the transcript is plain.
+const CONTEXT_LIMIT_RE = /[\d.,]+k\s*\/\s*([\d.]+)([km])\s+tokens/i;
+
 /**
  * Subscribe to a pty stream and update the agent's avatar state based on what
  * scrolls past. This is a stopgap until we wire real Claude Code hooks — it
@@ -82,6 +88,20 @@ export function usePtyParser(agentId: string) {
   return useCallback((chunk: string) => {
     const text = chunk.replace(ANSI_RE, '');
     if (!text.trim()) return;
+
+    // Passive context-limit sniffing from /context output (the gauge poll
+    // sends one probe per session; a manual /context works too). The limit
+    // only ever ratchets up — contextLimit is volatile across respawns.
+    const lim = CONTEXT_LIMIT_RE.exec(text);
+    if (lim) {
+      const value = parseFloat(lim[1]) * (lim[2].toLowerCase() === 'm' ? 1_000_000 : 1_000);
+      if (value >= 100_000) {
+        const agent = useStore.getState().agents.find((a) => a.id === agentId);
+        if (agent && value > (agent.contextLimit ?? 0)) {
+          updateAgent(agentId, { contextLimit: value });
+        }
+      }
+    }
 
     // The "esc to interrupt" footer is only shown while a turn is in progress.
     const running = /esc to interrupt/i.test(text);

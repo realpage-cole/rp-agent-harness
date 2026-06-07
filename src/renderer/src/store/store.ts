@@ -178,12 +178,14 @@ const LS_QUEUES = 'cth.messageQueues';
 const LS_ENRICH = 'cth.enrichEnabled';
 
 // Fields that are large or transient — not worth persisting across reloads.
-type PersistedAgent = Omit<Agent, 'recentAssistantText' | 'recentTextTs' | 'blockReason'>;
+// contextTokens/contextLimit describe a LIVE session; persisting them showed a
+// dead session's context gauge after a restart until the poll caught up.
+type PersistedAgent = Omit<Agent, 'recentAssistantText' | 'recentTextTs' | 'blockReason' | 'contextTokens' | 'contextLimit'>;
 
 function persistAgents(agents: Agent[], selectedId: string | null): void {
   try {
-    const slim: PersistedAgent[] = agents.map(({ recentAssistantText, recentTextTs, blockReason, ...rest }) => {
-      void recentAssistantText; void recentTextTs; void blockReason;
+    const slim: PersistedAgent[] = agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, ...rest }) => {
+      void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit;
       return rest;
     });
     window.localStorage.setItem(LS_AGENTS, JSON.stringify(slim));
@@ -200,6 +202,7 @@ function loadPersistedAgents(): Agent[] {
     // Reset volatile run-state; the PTY stream / mock loop will repopulate it.
     return parsed.map((a) => ({
       ...a,
+      progress: 0,
       status: 'idle',
       action: 'reconnecting…',
       currentStation: 'desk',
@@ -213,8 +216,8 @@ function loadPersistedAgents(): Agent[] {
 
 function persistArchived(archived: Agent[]): void {
   try {
-    const slim: PersistedAgent[] = archived.map(({ recentAssistantText, recentTextTs, blockReason, ...rest }) => {
-      void recentAssistantText; void recentTextTs; void blockReason;
+    const slim: PersistedAgent[] = archived.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, ...rest }) => {
+      void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit;
       return rest;
     });
     window.localStorage.setItem(LS_ARCHIVED, JSON.stringify(slim));

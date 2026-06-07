@@ -349,22 +349,26 @@ export function useHive(config: HarnessConfig | null): void {
     });
   }, []);
 
-  // 2c) Context gauge (#11/#12): poll each live agent's current context size
-  //     (tokens) from its session transcript and map it onto the agent card's
-  //     8-segment bar — a fuel gauge for how close the session is to its limit.
+  // 2c) Context gauge backfill: poll each live agent's current context size
+  //     (tokens) from its session transcript — only until the status line
+  //     (effect 2d) has delivered exact numbers for that agent.
   useEffect(() => {
     if (!config?.onboardingComplete) return;
     const poll = async () => {
       const { agents, updateAgent } = useStore.getState();
       for (const a of agents) {
         if (!a.ptyId) continue;
+        // The status line pushes exact numbers after every response (effect
+        // 2d) — this transcript poll only backfills agents whose status line
+        // hasn't fired yet (e.g. freshly restored, no response so far).
+        if (a.contextLimit !== undefined) continue;
         try {
           const ctx = await window.cth.agentContext(a.id);
           if (ctx === null) continue;
-          // 1M-context models advertise it in the model id (e.g. "[1m]").
-          const limit = /1m/i.test(a.model ?? '') ? 1_000_000 : 200_000;
+          const hinted = /1m/i.test(a.model ?? '') ? 1_000_000 : 200_000;
+          const limit = Math.max(hinted, ctx > 200_000 ? 1_000_000 : 0);
           const progress = Math.max(0, Math.min(8, Math.round((ctx / limit) * 8)));
-          updateAgent(a.id, { contextTokens: ctx, contextLimit: limit, progress });
+          updateAgent(a.id, { contextTokens: ctx, progress });
         } catch { /* ignore — try again next tick */ }
       }
     };
@@ -372,6 +376,16 @@ export function useHive(config: HarnessConfig | null): void {
     const iv = setInterval(poll, 15000);
     return () => { clearTimeout(t); clearInterval(iv); };
   }, [config?.onboardingComplete]);
+
+  // 2d) Push-based context gauge: the status-line shim forwards the session's
+  //     EXACT context accounting (tokens + real window size) after every
+  //     response — no probing, no transcript guesswork.
+  useEffect(() => {
+    return window.cth.onHiveContextUpdate(({ agentId, tokens, limit }) => {
+      const progress = Math.max(0, Math.min(8, Math.round((tokens / limit) * 8)));
+      useStore.getState().updateAgent(agentId, { contextTokens: tokens, contextLimit: limit, progress });
+    });
+  }, []);
 
   // 3) Wake idle agents holding unread inbox messages. The assistant is
   //    send-only (it never receives inbox mail), so it's excluded.

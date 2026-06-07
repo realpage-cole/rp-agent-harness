@@ -1024,12 +1024,15 @@ ipcMain.handle('app:resetAll', () => {
 ipcMain.handle('hive:agentUsage', (_evt, cwd: unknown) =>
   typeof cwd === 'string' ? readAgentUsage(cwd) : null);
 // Current context size (tokens) of an agent's LIVE session — the transcript
-// path is learned from the agent's hook payloads, so this works even when
-// several agents share one cwd. Null until the first hook fires.
+// path is learned from the agent's hook payloads (SessionStart fires right at
+// spawn), so this works even when several agents share one cwd. Null until the
+// first hook fires; a known-but-empty transcript reads as 0 so a freshly
+// (re)started session zeroes the gauge instead of leaving a stale value up.
 ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
   if (typeof agentId !== 'string') return null;
   const tp = hookServer.transcriptPath(agentId);
-  return tp ? readContextTokens(tp) : null;
+  if (!tp) return null;
+  return readContextTokens(tp) ?? 0;
 });
 
 // ─── IPC: live telemetry (the OTel collector — the locked usage-provider seam) ─

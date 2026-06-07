@@ -373,6 +373,15 @@ const api = {
     ipcRenderer.on('hive:hookEvent', listener);
     return () => ipcRenderer.removeListener('hive:hookEvent', listener);
   },
+  /** Push-based context accounting from the status line: live tokens + the
+   *  session's EXACT context-window size. Same pattern as onHiveHookEvent. */
+  onHiveContextUpdate: (
+    cb: (e: { agentId: string; tokens: number; limit: number }) => void
+  ): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { agentId: string; tokens: number; limit: number }) => cb(payload);
+    ipcRenderer.on('hive:contextUpdate', listener);
+    return () => ipcRenderer.removeListener('hive:contextUpdate', listener);
+  },
   onHiveMessage: (cb: (e: HiveRouteEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: HiveRouteEvent) => cb(payload);
     ipcRenderer.on('hive:message', listener);
