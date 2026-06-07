@@ -334,7 +334,7 @@ export function useHive(config: HarnessConfig | null): void {
     const iv = setInterval(async () => {
       const now = Date.now();
       const agents = useStore.getState().agents.filter(
-        (a) => a.ptyId && !a.isAssistant && (a.status === 'idle' || a.status === 'waiting')
+        (a) => a.ptyId && (a.status === 'idle' || a.status === 'waiting')
           // Don't type into an agent still running its boot sequence — the nudge
           // would collide with /remote-control + the orientation prompt.
           && (bootGraceUntil.current[a.id] ?? 0) < now
@@ -428,37 +428,14 @@ export function useHive(config: HarnessConfig | null): void {
     };
 
     const flush = () => {
-      const { agents, messageQueues, enrichEnabled, markMessageEnriching, removeQueuedMessage, enqueueMessage } = useStore.getState();
+      const { agents, messageQueues } = useStore.getState();
       const byId = (id: string) => agents.find((a) => a.id === id);
 
-      // Sub-agents: flush verbatim into their own terminal. Michael's queue is
-      // handled separately below.
       for (const a of agents) {
-        if (a.id === GOD_ID) continue;
         if (!a.ptyId || a.status !== 'idle') continue;
         if (!messageQueues[a.id]?.length) continue;
-        dispatch(a.id, a);
-      }
-
-      // Michael's queue: slash commands go verbatim (no card). Slack-origin or
-      // enrich-enabled non-commands go through headless Haiku. Slack card is
-      // stamped BEFORE enrichment — enriched re-queue loses .slack/.enrich.
-      if (messageQueues[GOD_ID]?.length) {
-        const head = messageQueues[GOD_ID][0];
-        if (!head.enriching) {
-          const isCmd = head.text.startsWith('/');
-          if (isCmd) { dispatch(GOD_ID, byId(GOD_ID)); }
-          else if (head.enrich || enrichEnabled) {
-            if (head.slack) void ensureSlackCard(head);
-            markMessageEnriching(GOD_ID, head.id);
-            const god = byId(GOD_ID);
-            window.cth.enrichMessage({ message: head.text, cwd: god?.cwd ?? '' })
-              .then((res) => { removeQueuedMessage(GOD_ID, head.id); enqueueMessage(GOD_ID, res.ok && res.prompt ? res.prompt : head.text); })
-              .catch(() => { removeQueuedMessage(GOD_ID, head.id); enqueueMessage(GOD_ID, head.text); });
-          } else {
-            if (dispatch(GOD_ID, byId(GOD_ID)) && head.slack) void ensureSlackCard(head);
-          }
-        }
+        const head = messageQueues[a.id][0];
+        if (dispatch(a.id, a) && head.slack) void ensureSlackCard(head);
       }
     };
 
@@ -479,21 +456,16 @@ export function useHive(config: HarnessConfig | null): void {
   //    webhook server pushes each verified message here via IPC; enqueueing to
   //    GOD_ID lands it in Michael's queue exactly as if the user had typed it
   //    into the composer — effect #4 above then drains it to his PTY.
-  //
-  //    For Slack-originated messages, a `#enrich` tag (case-insensitive) routes
-  //    to the enrich queue regardless of the global toggle; the tag is stripped
-  //    before dispatch. We also immediately ack in the triggering thread, and
-  //    stash the thread coords so the office can post its summary back later.
+  //    We immediately ack in the triggering thread and stash the thread coords
+  //    so the office can post its summary back later.
   useEffect(() => {
     if (!config?.onboardingComplete) return;
     return window.cth.onSlackMessage((msg) => {
       if (!msg?.text?.trim()) return;
-      const raw = msg.text.trim();
-      const enrich = /(^|\s)#enrich(\s|$)/i.test(raw);
-      const text = raw.replace(/(^|\s)#enrich(\s|$)/i, ' ').trim(); // strip the tag
+      const text = msg.text.trim();
       if (!text) return;
       const slack = { channel: msg.channel, thread_ts: msg.thread_ts };
-      useStore.getState().enqueueMessage(GOD_ID, text, { enrich, slack });
+      useStore.getState().enqueueMessage(GOD_ID, text, { slack });
       // Immediate "queued" acknowledgement in the originating Slack thread.
       void window.cth.slackReply({
         channel: msg.channel,

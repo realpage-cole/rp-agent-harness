@@ -121,7 +121,6 @@ export function AgentStrip({ config }: AgentStripProps) {
           contextLimit={a.contextLimit}
           selected={a.id === selectedId}
           isGod={a.isGod}
-          isAssistant={a.isAssistant}
           onClick={() => select(a.id)}
           doingCount={doingByAgent[a.id]?.length ?? 0}
           onTaskNoteClick={() => {

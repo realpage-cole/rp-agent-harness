@@ -20,8 +20,6 @@ export interface AgentCardProps {
   selected?: boolean;
   /** The orchestrator — gets a persistent accent frame + GOD tag so it stands out. */
   isGod?: boolean;
-  /** The prep assistant. Same size as every other card (no special sizing). */
-  isAssistant?: boolean;
   onClick?: () => void;
   /** Number of ledger tasks this agent is actively DOING — rendered as a blue
    *  sticky note stuck to the card. Clicking it opens the first task's detail. */

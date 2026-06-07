@@ -223,8 +223,6 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
   const agents = useStore((s) => s.agents);
   const select = useStore((s) => s.select);
   const updateAgent = useStore((s) => s.updateAgent);
-  const enrichEnabled = useStore((s) => s.enrichEnabled);
-  const setEnrichEnabled = useStore((s) => s.setEnrichEnabled);
   const toolCounts = useStore((s) => s.toolCounts);
   // Live OpenTelemetry per agent — merged into each agent card below (the old
   // standalone Fleet tab folded in here so the roster shows identity + controls
@@ -311,8 +309,6 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
       const [exe, ...args] = command.trim().split(/\s+/);
       const hive = a.isGod
         ? { id: a.id, name: a.name, provider, cwd: a.cwd, isGod: true, role: 'orchestrator (god)' }
-        : a.isAssistant
-        ? { id: a.id, name: a.name, provider, cwd: a.cwd, isAssistant: true, role: "Michael's prep assistant" }
         : { id: a.id, name: a.name, provider, cwd: a.cwd, role: a.description };
       const res = await window.cth.spawnPty({ id: a.ptyId, cwd: a.cwd, command: exe, provider, args, cols: 100, rows: 30, hive });
       if (res.ok) updateAgent(a.id, { command: command.trim(), provider, model, status: 'idle', action: 'restarting…' });
@@ -407,7 +403,7 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
           </span>
           <Select value={dispatchTo} onChange={setDispatchTo}>
             <option value="">Michael decides</option>
-            {agents.filter((a) => !a.isGod && !a.isAssistant).map((a) => (
+            {agents.filter((a) => !a.isGod).map((a) => (
               <option key={a.id} value={a.id}>{a.name}</option>
             ))}
           </Select>
@@ -463,7 +459,7 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                   border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
                   fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)'
                 }}
-              >{a.name}{a.isGod ? ' (god)' : a.isAssistant ? ' (assistant)' : ''}</button>
+              >{a.name}{a.isGod ? ' (god)' : ''}</button>
               <PixelBadge status={armed ? 'looping' : a.status} />
               {armed && <span title={breaker?.reason} style={{ color: 'var(--cth-coral)', fontSize: 12 }}>⚠</span>}
               <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--cth-ink-500)' }}>
@@ -570,22 +566,6 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
       </Section>
 
       <ArchivedSection />
-
-      <Section title="ENRICH">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 13, color: 'var(--cth-ink-700)' }}>Enrich prompts with Haiku before Michael</span>
-          <button
-            onClick={() => setEnrichEnabled(!enrichEnabled)}
-            style={{
-              marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4,
-              padding: '2px 8px 1px', border: 'none', cursor: 'pointer',
-              background: enrichEnabled ? 'var(--cth-lemon)' : 'var(--cth-cream-200)',
-              boxShadow: `inset 0 0 0 1px ${enrichEnabled ? 'var(--cth-ink-900)' : 'var(--cth-ink-700)'}`,
-              fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)'
-            }}
-          ><Icon name="sparkle" /> enrich {enrichEnabled ? 'on' : 'off'}</button>
-        </div>
-      </Section>
 
       <Section title="SCHEDULES">
         {missions.length === 0 && <Muted>No scheduled missions.</Muted>}

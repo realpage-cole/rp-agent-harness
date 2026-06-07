@@ -12,7 +12,6 @@ export interface HiveAgentMeta {
   capabilities?: string[];
   cwd: string;
   isGod?: boolean;
-  isAssistant?: boolean;
 }
 
 export interface HiveMessage {
@@ -397,12 +396,6 @@ const api = {
   hiveSend: (msg: Partial<HiveMessage>, from?: string): Promise<{ ok: boolean; error?: string; message?: HiveMessage }> =>
     ipcRenderer.invoke('hive:send', msg, from),
 
-  // ─── Enrichment assistant (headless Sonnet 1M prompt prep for Michael) ─────
-  /** Run Michael's silent assistant on a raw message and return an enriched,
-   *  context-rich prompt. `cwd` is the agent's working directory (its default
-   *  context); the assistant may read every registered repo to gather more. */
-  enrichMessage: (req: { message: string; cwd: string }): Promise<{ ok: boolean; prompt?: string; error?: string }> =>
-    ipcRenderer.invoke('assistant:enrich', req),
   onHiveHookEvent: (
     cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => void
   ): (() => void) => {

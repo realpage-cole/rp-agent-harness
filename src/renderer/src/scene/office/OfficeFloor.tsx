@@ -919,7 +919,7 @@ export function OfficeFloor() {
         for (const [id, rt] of runtimes) {
           if (id === god!.id) continue;
           const a = agentById(id);
-          if (!a || a.isAssistant) continue;
+          if (!a) continue;
           // only relaxed workers perform — not someone mid-thought of real work
           if (a.status !== 'idle' && a.status !== 'success') continue;
           if (rt.brk?.chat || rt.brk?.chattingWith) continue;

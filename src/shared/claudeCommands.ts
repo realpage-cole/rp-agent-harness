@@ -126,7 +126,7 @@ export const COMMAND_GROUPS: CmdGroup[] = [
     title: 'AUTOMATION (HEADLESS)',
     items: [
       { cmd: 'claude -p "your prompt"', kind: 'cli', desc: 'Print mode: run one prompt non-interactively and exit.', usage: 'cat log | claude -p "summarize"' },
-      { cmd: 'claude -p "..." --output-format json', kind: 'cli', desc: 'Headless with structured JSON (result, usage, cost) — powers enrichment.' },
+      { cmd: 'claude -p "..." --output-format json', kind: 'cli', desc: 'Headless with structured JSON (result, usage, cost).' },
       { cmd: 'claude -p "..." --output-format stream-json', kind: 'cli', desc: 'Streaming JSON events for live consumption.' },
       { cmd: 'claude -p "..." --json-schema <schema>', kind: 'cli', desc: 'Force the headless result to match a JSON Schema.' },
       { cmd: 'claude --append-system-prompt "..."', kind: 'cli', desc: 'Append extra instructions to the default system prompt.' }

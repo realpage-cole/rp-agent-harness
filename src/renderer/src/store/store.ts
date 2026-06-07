@@ -61,9 +61,6 @@ export interface Agent {
   lastPrompt?: string;
   /** the orchestrator ("god") agent — seated in Michael's room, runs the floor */
   isGod?: boolean;
-  /** Michael's prep assistant ("Dwight") — enriches prompts and forwards them to
-   *  Michael via the hive. Send-only: never receives inbox/broadcast mail. */
-  isAssistant?: boolean;
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */
   worktreePath?: string;
@@ -86,18 +83,12 @@ export interface FeedEntry {
 
 /** A message the user has parked for an agent while its terminal was busy.
  *  Queued messages are drained one at a time when the agent next goes idle (see
- *  useHive's flush loop). For Michael's queue the enrich toggle decides whether
- *  each one is sent through headless Haiku enrichment or typed in directly. */
+ *  useHive's flush loop). */
 export interface QueuedMessage {
   id: string;
   text: string;
   /** epoch ms the message was queued — drives ordering and the "queued 2m ago" hint */
   ts: number;
-  /** True while headless Haiku enrichment is in flight. Prevents double-dispatch;
-   *  the message stays visible in the queue with an 'enriching…' indicator. */
-  enriching?: boolean;
-  /** Slack-originated: route to the enrich queue regardless of the global toggle. */
-  enrich?: boolean;
   /** Slack-originated: thread coordinates so the office can reply in-thread. */
   slack?: { channel: string; thread_ts: string };
 }
@@ -134,11 +125,6 @@ interface State {
    *  Lets the user keep "talking" to a busy agent: messages park here and are
    *  drained to the terminal one-by-one once the agent is free. */
   messageQueues: Record<string, QueuedMessage[]>;
-  /** Global toggle: when on, messages queued for Michael are routed through the
-   *  assistant ("Dwight") to be enriched with context before reaching Michael;
-   *  when off, they're typed straight into Michael. */
-  enrichEnabled: boolean;
-  setEnrichEnabled: (on: boolean) => void;
   /** Per-agent tool-call count this session — a lightweight activity/usage proxy
    *  shown in the command center (interactive sessions don't expose billed $). */
   toolCounts: Record<string, number>;
@@ -178,14 +164,10 @@ interface State {
    *  composer) doesn't eat what the user was typing. */
   drafts: Record<string, string>;
   setDraft: (agentId: string, text: string) => void;
-  /** Park a message for an agent. Returns nothing; the flush loop delivers it.
-   *  `meta` carries optional Slack routing context (enrich flag + reply thread). */
-  enqueueMessage: (agentId: string, text: string, meta?: { enrich?: boolean; slack?: { channel: string; thread_ts: string } }) => void;
+  /** Park a message for an agent. Returns nothing; the flush loop delivers it. */
+  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string } }) => void;
   /** Drop a single queued message (user removed it, or it was just delivered). */
   removeQueuedMessage: (agentId: string, messageId: string) => void;
-  /** Mark a queued message as enriching (in-flight Haiku call). Prevents the
-   *  drain from double-dispatching it while enrichment is in progress. */
-  markMessageEnriching: (agentId: string, messageId: string) => void;
   /** Clear an agent's entire pending queue. */
   clearQueue: (agentId: string) => void;
   setAddAgentOpen: (open: boolean) => void;
@@ -206,7 +188,6 @@ const LS_ARCHIVED = 'cth.archivedAgents';
 const LS_RESTORABLE = 'cth.restorableAgents';
 const LS_SELECTED = 'cth.selectedId';
 const LS_QUEUES = 'cth.messageQueues';
-const LS_ENRICH = 'cth.enrichEnabled';
 
 // Fields that are large or transient — not worth persisting across reloads.
 // contextTokens/contextLimit describe a LIVE session; persisting them showed a
@@ -360,9 +341,6 @@ const initialArchivedAgents = loadPersistedArchived();
 const initialRestorableAgents = loadPersistedRestorable();
 const initialSelectedId = loadPersistedSelectedId(initialAgents);
 const initialQueues = loadPersistedQueues();
-const initialEnrichEnabled: boolean = (() => {
-  try { return window.localStorage.getItem(LS_ENRICH) === '1'; } catch { return false; }
-})();
 
 let queuedSeq = 0;
 /** Process-unique id for a queued message (timestamp + counter avoids collisions
@@ -385,11 +363,6 @@ export const useStore = create<State>((set) => ({
   sidebarTab: initialSidebarTab,
   godStatus: 'booting',
   messageQueues: initialQueues,
-  enrichEnabled: initialEnrichEnabled,
-  setEnrichEnabled: (on) => {
-    try { window.localStorage.setItem(LS_ENRICH, on ? '1' : '0'); } catch { /* noop */ }
-    set({ enrichEnabled: on });
-  },
   toolCounts: {},
   bumpToolCount: (id) =>
     set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
@@ -486,7 +459,6 @@ export const useStore = create<State>((set) => ({
       if (!trimmed) return s;
       const msg: QueuedMessage = {
         id: newQueuedId(), text: trimmed, ts: Date.now(),
-        ...(meta?.enrich ? { enrich: true } : {}),
         ...(meta?.slack ? { slack: meta.slack } : {})
       };
       const messageQueues = { ...s.messageQueues, [agentId]: [...(s.messageQueues[agentId] ?? []), msg] };
@@ -502,16 +474,6 @@ export const useStore = create<State>((set) => ({
       persistQueues(messageQueues);
       return { messageQueues };
     }),
-  markMessageEnriching: (agentId, messageId) =>
-    set((s) => {
-      const q = s.messageQueues[agentId];
-      if (!q) return s;
-      const idx = q.findIndex((m) => m.id === messageId);
-      if (idx === -1) return s;
-      const updated = [...q];
-      updated[idx] = { ...updated[idx], enriching: true };
-      return { messageQueues: { ...s.messageQueues, [agentId]: updated } };
-    }),
   clearQueue: (agentId) =>
     set((s) => {
       if (!s.messageQueues[agentId]?.length) return s;
@@ -526,10 +488,10 @@ export const useStore = create<State>((set) => ({
       const agents = s.agents.filter((a) => !a.ptyId || live.has(a.ptyId));
       if (agents.length === s.agents.length) return s;
       // Workers whose terminal died with the previous session become restorable
-      // (full spawn recipe retained) instead of silently vanishing. God and the
-      // assistant are excluded — they auto-respawn at boot.
+      // (full spawn recipe retained) instead of silently vanishing. God is excluded
+      // — auto-respawns at boot.
       const dead = s.agents.filter(
-        (a) => a.ptyId && !live.has(a.ptyId) && !a.isGod && !a.isAssistant
+        (a) => a.ptyId && !live.has(a.ptyId) && !a.isGod
       );
       const restorableAgents = [
         ...s.restorableAgents.filter((r) => !dead.some((d) => d.id === r.id)),

@@ -20,7 +20,6 @@ import type { UsageProvider } from './usage';
 import { MemoryManager } from './memory';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
-import { enrichMessage } from './assistant';
 import { readAgentUsage, readContextTokens } from './transcript';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
@@ -330,7 +329,7 @@ function looksStuck(windowMs: number): boolean {
   const reg = hive.registry();
   const now = Date.now();
   for (const [id, a] of Object.entries(reg.agents)) {
-    if (a.archived || a.isAssistant || id === reg.godId) continue;
+    if (a.archived || id === reg.godId) continue;
     const ptyId = ptyForAgent(id);
     if (!ptyId) continue;
     const idle = ptyManager.idleFor(ptyId) ?? Infinity;
@@ -343,7 +342,7 @@ function looksStuck(windowMs: number): boolean {
  *  #6.2). A few hundred tokens at most. */
 function buildHeartbeatDigest(quietMs: number): string {
   const reg = hive.registry();
-  const active = Object.entries(reg.agents).filter(([id, a]) => !a.archived && !a.isAssistant && id !== reg.godId);
+  const active = Object.entries(reg.agents).filter(([id, a]) => !a.archived && id !== reg.godId);
   const names = active.map(([, a]) => a.name).join(', ') || '—';
   const boardHead = hive.board().split('\n').slice(0, 10).join('\n').trim();
   const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
@@ -391,7 +390,7 @@ function runBreakerBeat(progressWindowMs: number): void {
   const now = Date.now();
   const inputs: BreakerInput[] = [];
   for (const [id, a] of Object.entries(reg.agents)) {
-    if (a.archived || a.isAssistant) continue;
+    if (a.archived) continue;
     const sample = usageProvider.getAgentUsage(id);
     if (sample) hive.appendCostLedger(sample); // ledger covers everyone incl. god
     if (id === reg.godId) continue;            // breaker skips god
@@ -436,10 +435,9 @@ function writeFleetSnapshot(): void {
         return {
           id,
           name: a.name,
-          role: a.role ?? (a.isGod ? 'orchestrator' : a.isAssistant ? 'assistant' : 'agent'),
+          role: a.role ?? (a.isGod ? 'orchestrator' : 'agent'),
           cwd: a.cwd,
           isGod: !!a.isGod,
-          isAssistant: !!a.isAssistant,
           breaker: breaker.levelFor(id),
           tokens,
           usd: u ? Number(u.usd.toFixed(4)) : 0,
@@ -1219,28 +1217,6 @@ ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
   hive.setArchived(id, archived === true);
   return { ok: true };
-});
-
-// ─── IPC: enrichment assistant (headless Sonnet 1M prompt prep) ─────────────
-ipcMain.handle('assistant:enrich', async (_evt, payload: unknown) => {
-  const p = (payload ?? {}) as { message?: unknown; cwd?: unknown };
-  if (typeof p.message !== 'string' || !p.message.trim()) {
-    return { ok: false, error: 'empty message' };
-  }
-  const cfg = readConfig();
-  const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : cfg.harnessHome;
-  if (!cwd) return { ok: false, error: 'no working directory available' };
-  try {
-    return await enrichMessage({
-      message: p.message,
-      cwd,
-      repos: cfg.registeredRepos ?? [],
-      command: cfg.defaultCommand,
-      env: memory.env()
-    });
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
 });
 
 // ─── IPC: semantic memory (MemPalace CLI) ───────────────────────────────────

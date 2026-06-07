@@ -5,7 +5,6 @@ import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
-import { AssistantRoleNote } from './AssistantRoleNote';
 import { CommandCenterPanel } from './CommandCenterPanel';
 import { disposeTerminal } from './terminalPool';
 import { SidebarTabs } from './SidebarTabs';
@@ -172,7 +171,7 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
                   embedded
                 />
               </div>
-              {agent.isAssistant ? <AssistantRoleNote /> : <MessageQueueComposer agent={agent} />}
+              <MessageQueueComposer agent={agent} />
             </div>
             )
           ) : (

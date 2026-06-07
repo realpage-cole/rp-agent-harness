@@ -3,7 +3,6 @@ import { PixelBadge } from './PixelBadge';
 import { PixelButton } from './PixelButton';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
-import { AssistantRoleNote } from './AssistantRoleNote';
 import { disposeTerminal } from './terminalPool';
 import { Icon } from './Icon';
 import { SpritePortrait } from './SpritePortrait';
@@ -147,7 +146,7 @@ export function FullscreenTerminal() {
               fullscreen
             />
           </div>
-          {agent.isAssistant ? <AssistantRoleNote /> : <MessageQueueComposer agent={agent} />}
+          <MessageQueueComposer agent={agent} />
         </div>
       </div>
     </div>

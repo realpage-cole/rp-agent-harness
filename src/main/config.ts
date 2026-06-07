@@ -242,30 +242,27 @@ export function resetConfig(): HarnessConfig {
   return { ...DEFAULTS };
 }
 
-/** Model ids by tier (Lane A #6.4). Kept in sync with AGENT_MODELS / ASSISTANT_MODEL
- *  in src/renderer/src/store/config.ts and ASSISTANT_MODEL in src/main/assistant.ts. */
+/** Model ids by tier (Lane A #6.4). Kept in sync with AGENT_MODELS in
+ *  src/renderer/src/store/config.ts. */
 const MODEL_GOD = 'claude-opus-4-8';                  // orchestration — highest capability
 const MODEL_WORKER = 'claude-sonnet-4-6';             // general execution
-const MODEL_ASSISTANT = 'claude-sonnet-4-6[1m]';      // large-context prep assistant
 const MODEL_HELPER = 'claude-haiku-4-5-20251001';     // narrow, cheap helpers
 
 /** Minimal structural shape for tiering — a subset of AgentMeta so config.ts
  *  stays free of a hive.ts import. */
 export interface RoleHint {
   isGod?: boolean;
-  isAssistant?: boolean;
   role?: string;
   capabilities?: string[];
 }
 
 /** Default model for an agent given its role (Lane A #6.4): Opus for the god,
- *  Sonnet·1M for the prep assistant, Haiku for narrow helpers (triage / routing /
- *  verification / formatting), Sonnet for general workers. Returns a model id
- *  (matching AGENT_MODELS) or undefined to fall back to the CLI default. This is
- *  only a DEFAULT — an explicit per-agent model selection always wins. */
+ *  Haiku for narrow helpers (triage / routing / verification / formatting),
+ *  Sonnet for general workers. Returns a model id (matching AGENT_MODELS) or
+ *  undefined to fall back to the CLI default. This is only a DEFAULT — an
+ *  explicit per-agent model selection always wins. */
 export function modelForRole(meta: RoleHint): string | undefined {
   if (meta.isGod) return MODEL_GOD;
-  if (meta.isAssistant) return MODEL_ASSISTANT;
   const hay = `${meta.role ?? ''} ${(meta.capabilities ?? []).join(' ')}`.toLowerCase();
   if (/\b(triage|rout|verif|lint|format|summar|classif|label)/.test(hay)) return MODEL_HELPER;
   return MODEL_WORKER;
