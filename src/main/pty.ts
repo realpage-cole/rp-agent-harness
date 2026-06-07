@@ -64,10 +64,24 @@ export class PtyManager {
     if (command.includes('/') || command.includes('\\')) return command;
     if (process.platform === 'win32') {
       // `where` is the Windows equivalent of `which`; runs via cmd.exe (shell:true).
+      // It can return MULTIPLE matches in PATH order, and the first is often an
+      // EXTENSIONLESS shim (e.g. a bare `claude`). node-pty's CreateProcess can
+      // only launch a real executable/script — one whose extension is in PATHEXT
+      // (.EXE/.CMD/.BAT/…); an extensionless file fails with error 193 (issue
+      // #22). So skip extensionless hits and take the first PATHEXT-eligible one.
       try {
         const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000, shell: true });
-        const path = (res.stdout ?? '').trim().split(/\r?\n/)[0];
-        if (path && existsSync(path)) return path;
+        const lines = (res.stdout ?? '').trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const pathExts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
+        const isExecutable = (p: string): boolean => {
+          const dot = p.lastIndexOf('.');
+          const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+          if (dot <= sep) return false; // no extension on the basename
+          return pathExts.includes(p.slice(dot).toUpperCase());
+        };
+        const exe = lines.find((p) => isExecutable(p) && existsSync(p));
+        if (exe) return exe;
       } catch { /* fall through */ }
       // Common Windows install locations (npm global = %APPDATA%\npm\<cmd>.cmd).
       const appData = process.env.APPDATA ?? '';
