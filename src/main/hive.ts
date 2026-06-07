@@ -544,9 +544,15 @@ export class HiveManager {
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
     const targets = msg.to === 'broadcast'
       // The roster for fan-out is the ACTIVE registry: skip the send-only prep
-      // assistant and any archived agent (closed tab) so mail never piles into a
-      // dead inbox no one will read.
-      ? Object.keys(reg.agents).filter((a) => a !== msg.from && !reg.agents[a]?.isAssistant && !reg.agents[a]?.archived)
+      // assistant, any archived agent (closed tab), and non-hive-aware providers
+      // (e.g. Antigravity's agy — they never drain an inbox) so mail never piles
+      // into a dead inbox no one will read. A broadcast just skips them; their
+      // god relays anything they actually need (direct mail to them bounces).
+      ? Object.keys(reg.agents).filter((a) =>
+          a !== msg.from
+          && !reg.agents[a]?.isAssistant
+          && !reg.agents[a]?.archived
+          && isHiveAwareProvider(reg.agents[a]?.provider))
       // Never deliver to self — guards a god → "human" message looping back to god.
       : [resolveTo(msg.to)].filter((t) => t !== msg.from);
     for (const t of targets) {
