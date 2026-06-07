@@ -29,10 +29,10 @@ export const AGENT_PROVIDER_PRESETS: AgentProviderPreset[] = [
     label: 'Codex',
     defaultCommand: 'codex',
     commandGroups: CODEX_COMMAND_GROUPS,
-    // --full-auto: auto-approves workspace operations, keeps OS sandbox scoped to
-    // workspace (no outbound network). Matches the non-interactive intent of
+    // -a never: never prompt for approval; -s workspace-write: sandbox scoped to
+    // the workspace (no outbound network). Matches the non-interactive intent of
     // Claude's bypassPermissions while retaining a safety boundary.
-    autoModeFlag: '--full-auto',
+    autoModeFlag: '-a never -s workspace-write',
     // Suppresses first-run interactive prompts (directory-trust gate, installer).
     nonInteractiveEnv: { CODEX_NON_INTERACTIVE: '1' }
   },

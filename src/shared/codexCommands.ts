@@ -41,10 +41,10 @@ export const CODEX_COMMAND_GROUPS: CmdGroup[] = [
   {
     title: 'APPROVALS & PERMISSIONS',
     items: [
-      { cmd: 'codex --full-auto', kind: 'cli', desc: 'Run without approval prompts for workspace operations. Maintains an OS-enforced workspace sandbox (no outbound network). Use this for auto mode.' },
-      { cmd: 'codex --dangerously-bypass-approvals-and-sandbox', kind: 'cli', desc: 'Skip all approval prompts AND disable the OS sandbox entirely. Alias: --yolo. For fully-isolated environments (Docker, CI VM) only.' },
-      { cmd: 'codex --ask-for-approval never', kind: 'cli', desc: 'Never ask for approval (fine-grained flag — pair with --sandbox for full control).' },
-      { cmd: 'codex --sandbox danger-full-access', kind: 'cli', desc: 'Remove all sandbox restrictions (fine-grained flag).' }
+      { cmd: 'codex -a never -s workspace-write', kind: 'cli', desc: 'Auto mode: never prompt for approval (-a never) and scope the sandbox to the workspace (-s workspace-write). Used by Munder Difflin when auto mode is on.' },
+      { cmd: 'codex --dangerously-bypass-approvals-and-sandbox', kind: 'cli', desc: 'Skip all approval prompts AND disable the OS sandbox entirely. CI-only full-bypass override — for externally-isolated environments (Docker, CI VM) only.' },
+      { cmd: 'codex -a untrusted', kind: 'cli', desc: 'Only run trusted commands without asking; escalate to the user for anything else.' },
+      { cmd: 'codex -s danger-full-access', kind: 'cli', desc: 'Remove all sandbox restrictions (fine-grained flag — pair with -a for full control).' }
     ]
   },
   {
