@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Application, Container, Ticker, Texture } from 'pixi.js';
+import { Application, Container, Graphics, Ticker, Texture } from 'pixi.js';
 // PixiJS uses new Function() internally, blocked by Electron CSP — this patches it.
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
@@ -438,6 +438,94 @@ export function OfficeFloor() {
         startBreak(agent.id, rt);
       };
 
+      // ─── The office task board: hive/tasks.json pinned to the wall ─────────
+      // A cork board hangs on the wall band above the open-plan desks, polled
+      // from the task ledger every 5s. Live notes (one per task) pin in urgency
+      // order — red (blocked) → yellow (todo) → blue (doing) — and finished
+      // tasks archive as a green stack on the little table beside it. The board
+      // is INTERACTIVE: clicking it selects the god agent and opens the Command
+      // Center's tasks tab (kanban) in the right panel.
+      const BOARD_TILE: Tile = { x: 8, y: 10 };
+      const NOTE_COLORS: Record<string, number> = {
+        todo: 0xf2df8a, doing: 0x9ecbf0, blocked: 0xf0a3a3, done: 0xa8e0b0
+      };
+      const tsB = mapRenderer.tileSize;
+      const boardG = new Graphics();
+      boardG.eventMode = 'static';
+      boardG.cursor = 'pointer';
+      boardG.position.set(BOARD_TILE.x * tsB, BOARD_TILE.y * tsB);
+      boardG.zIndex = (BOARD_TILE.y + 1) * tsB;
+      boardG.on('pointertap', (ev) => {
+        ev.stopPropagation();
+        const st = useStore.getState();
+        const god = st.agents.find((a) => a.isGod);
+        if (god) st.select(god.id);
+        st.requestCommandCenterTab('tasks');
+      });
+      charLayer.addChild(boardG);
+
+      const drawTaskBoard = (statuses: string[]): void => {
+        boardG.clear();
+        // The cork carries only LIVE work (todo/doing/blocked); finished notes
+        // are archived as a green stack on the little table beside it. Live
+        // notes pin in urgency order: red (blocked) → yellow (todo) → blue
+        // (doing), so trouble always hangs top-left where the eye lands first.
+        const NOTE_RANK: Record<string, number> = { blocked: 0, todo: 1, doing: 2 };
+        const active = statuses
+          .filter((s) => s !== 'done')
+          .sort((a, b) => (NOTE_RANK[a] ?? 3) - (NOTE_RANK[b] ?? 3));
+        const done = statuses.length - active.length;
+        // frame + cork, two tiles wide, hung on the wall face
+        boardG.rect(0, -8, 32, 22).fill(0x6e5639);
+        boardG.rect(1, -7, 30, 20).fill(0xc9b083);
+        // sticky notes, 4 per row, capped at 12 — a fuller ledger stacks a
+        // visibly thicker pile in the corner instead of overflowing the cork
+        const n = Math.min(active.length, 12);
+        for (let i = 0; i < n; i++) {
+          const col = i % 4;
+          const row = Math.floor(i / 4);
+          const x = 3 + col * 7;
+          const y = -4 + row * 6;
+          boardG.rect(x, y, 5, 4).fill(NOTE_COLORS[active[i]] ?? 0xf2eddc);
+          boardG.rect(x + 2, y, 1, 1).fill(0x4a3b52); // pin
+        }
+        if (active.length > 12) {
+          boardG.rect(24, 8, 5, 4).fill(0xe8e0c8);
+          boardG.rect(25, 7, 5, 4).fill(0xf2eddc);
+          boardG.rect(27, 9, 1, 1).fill(0x4a3b52);
+        }
+        // The archive table: every finished task adds a green sheet to the
+        // pile (visible stack capped at 6 — beyond that it just sits proud).
+        boardG.rect(34, 6, 14, 4).fill(0xb08d5e);   // table top
+        boardG.rect(34, 10, 14, 4).fill(0x8a6f4d);  // table front
+        boardG.rect(35, 14, 2, 2).fill(0x6e5639);   // legs
+        boardG.rect(45, 14, 2, 2).fill(0x6e5639);
+        const stack = Math.min(done, 6);
+        for (let i = 0; i < stack; i++) {
+          boardG.rect(37 + (i % 2), 4 - i * 2, 8, 2)
+            .fill({ color: NOTE_COLORS.done, alpha: 1 })
+            .stroke({ color: 0x6e8f6e, width: 0.5 });
+        }
+      };
+      drawTaskBoard([]);
+
+      let lastTaskSig = '∅';
+      const pollTaskBoard = async (): Promise<void> => {
+        try {
+          const raw = await window.cth.hiveTasks() as { tasks?: Array<{ status?: string }> } | Array<{ status?: string }> | null;
+          const arr = Array.isArray(raw) ? raw : (raw?.tasks ?? []);
+          const statuses = arr.map((t) => String(t?.status ?? 'todo'));
+          const sig = statuses.join(',');
+          if (sig !== lastTaskSig) {
+            lastTaskSig = sig;
+            drawTaskBoard(statuses);
+          }
+        } catch { /* keep the last drawing */ }
+      };
+      void pollTaskBoard();
+      const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 5000);
+      (app as any).__taskBoardPoll = taskBoardPoll;
+
       const addCharacter = async (agent: Agent) => {
         const charName = CAST_BY_NAME[agent.character] ? agent.character : DEFAULT_CHARACTER;
         const member = CAST_BY_NAME[charName];
@@ -720,6 +808,7 @@ export function OfficeFloor() {
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__offMessage?.(); } catch { /* noop */ }
+        try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
         safeDestroy(a);
       }
       appRef.current = null;

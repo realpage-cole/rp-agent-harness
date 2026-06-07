@@ -147,6 +147,10 @@ interface State {
   removeArchivedAgent: (id: string) => void;
   /** Drop one agent from the restorable list (it was respawned or dismissed). */
   removeRestorableAgent: (id: string) => void;
+  /** One-shot request to open a Command-Center tab (e.g. clicking the office
+   *  task board → 'tasks'). `seq` makes repeated identical requests distinct. */
+  ccTabRequest: { tab: string; seq: number } | null;
+  requestCommandCenterTab: (tab: string) => void;
   /** Unsent composer drafts, per agent — so switching agents (which remounts the
    *  composer) doesn't eat what the user was typing. */
   drafts: Record<string, string>;
@@ -434,6 +438,9 @@ export const useStore = create<State>((set) => ({
       persistRestorable(restorableAgents);
       return { restorableAgents };
     }),
+  ccTabRequest: null,
+  requestCommandCenterTab: (tab) =>
+    set((s) => ({ ccTabRequest: { tab, seq: (s.ccTabRequest?.seq ?? 0) + 1 } })),
   drafts: {},
   setDraft: (agentId, text) =>
     set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),

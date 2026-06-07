@@ -83,6 +83,14 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
 
 export function CommandCenterPanel({ agent }: { agent: Agent }) {
   const [tab, setTab] = useState<CCTab>('terminal');
+  // External tab requests (the office task board click → 'tasks'). seq-keyed so
+  // clicking the board again re-opens the tab even if it was already requested.
+  const ccTabRequest = useStore((s) => s.ccTabRequest);
+  useEffect(() => {
+    if (ccTabRequest && TABS.some((t) => t.key === ccTabRequest.tab)) {
+      setTab(ccTabRequest.tab as CCTab);
+    }
+  }, [ccTabRequest]);
   // A task-card "assign" pre-fills the Floor dispatch box and jumps to it. The
   // counter bumps so re-assigning the same card re-seeds the textarea (the seed
   // string alone wouldn't change). { seq } makes every assign distinct.
