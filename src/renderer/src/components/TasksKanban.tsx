@@ -107,14 +107,15 @@ function parseTasks(raw: unknown): HiveTask[] {
  * (assignee from the live roster, priority, dependsOn), and "assign" a card —
  * which pre-fills the Floor tab's dispatch box and switches to it.
  */
-export function TasksKanban({ onAssign }: { onAssign: (prefill: string) => void }) {
+export function TasksKanban() {
   const agents = useStore((s) => s.agents);
   const [tasks, setTasks] = useState<HiveTask[]>([]);
   const [adding, setAdding] = useState(false);
   // Detail view: cards show just the title — clicking one opens the full
-  // breakdown (description contract, assignee, deps, controls). Stored as the
-  // task ID so the 5s poll keeps the open detail fresh.
-  const [detailId, setDetailId] = useState<string | null>(null);
+  // breakdown as an APP-WIDE overlay over the office floor (see
+  // TaskDetailOverlay) — the content grows (contracts, deps, human Q&A), so it
+  // gets the big stage instead of the narrow side panel.
+  const openTaskDetail = useStore((s) => s.openTaskDetail);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -136,15 +137,6 @@ export function TasksKanban({ onAssign }: { onAssign: (prefill: string) => void 
     persist([...tasks, t]);
     setAdding(false);
   }, [tasks, persist]);
-
-  const moveTask = useCallback((id: string, status: Status) => {
-    persist(tasks.map((t) => (t.id === id ? { ...t, status } : t)));
-  }, [tasks, persist]);
-
-  const assign = useCallback((t: HiveTask) => {
-    const desc = t.description?.trim() ? t.description.trim() : '(no description)';
-    onAssign(`Task: ${t.title}\nContext: ${desc}\n`);
-  }, [onAssign]);
 
   const restorableAgents = useStore((s) => s.restorableAgents);
   /** Resolve an assignee id to a display name — falls back to the restorable
@@ -217,7 +209,7 @@ export function TasksKanban({ onAssign }: { onAssign: (prefill: string) => void 
                     task={t}
                     accent={col.accent}
                     assigneeName={nameFor(t.assignee)}
-                    onOpen={() => setDetailId(t.id)}
+                    onOpen={() => openTaskDetail(t.id)}
                   />
                 ))}
               </div>
@@ -225,21 +217,6 @@ export function TasksKanban({ onAssign }: { onAssign: (prefill: string) => void 
           );
         })}
       </div>
-
-      {detailId && (() => {
-        const t = tasks.find((x) => x.id === detailId);
-        if (!t) return null;
-        return (
-          <TaskDetail
-            task={t}
-            all={tasks}
-            assigneeName={nameFor(t.assignee)}
-            onMove={(s) => moveTask(t.id, s)}
-            onAssign={() => { assign(t); setDetailId(null); }}
-            onClose={() => setDetailId(null)}
-          />
-        );
-      })()}
     </div>
   );
 }
@@ -294,10 +271,13 @@ function TaskCard({ task, accent, assigneeName, onOpen }: {
 // ─── Detail view ─────────────────────────────────────────────────────────────
 // The full breakdown of one task: status, assignee, priority, the complete
 // description (the god writes 4-part dispatch contracts in there — preserved
-// line by line), dependencies resolved to their titles, and the move/assign
-// controls that used to crowd every card.
+// line by line), dependencies resolved to their titles, the human Q&A trail,
+// and the move/assign controls that used to crowd every card. Rendered as an
+// APP-WIDE overlay (over the office floor) — this content grows, so it gets
+// the big stage instead of the narrow side panel. Exported for App's
+// TaskDetailOverlay; opened via the store's openTaskDetail from anywhere.
 
-function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose }: {
+export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose }: {
   task: HiveTask;
   all: HiveTask[];
   assigneeName?: string;
@@ -314,12 +294,12 @@ function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose }: {
     <div
       onClick={onClose}
       style={{
-        position: 'absolute', inset: 0, zIndex: 50,
-        background: 'rgba(26, 19, 32, 0.55)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16
+        position: 'fixed', inset: 0, zIndex: 280,
+        background: 'rgba(26, 19, 32, 0.6)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24
       }}
     >
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 460, maxWidth: '94%', maxHeight: '92%', display: 'flex' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 720, maxWidth: '94vw', maxHeight: '90vh', display: 'flex' }}>
         <PixelPanel variant="dialog" title="TASK" noPadding style={{ display: 'flex', flexDirection: 'column', width: '100%', minHeight: 0 }}>
           <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflowY: 'auto' }}>
             {/* Title under a status-colored bar */}

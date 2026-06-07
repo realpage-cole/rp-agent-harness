@@ -18,6 +18,7 @@ import { Icon } from '@/components/Icon';
 import { SidebarSplitter } from '@/components/SidebarSplitter';
 import { acquireTerminal } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
+import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
 import { FullscreenFileEditor } from '@/components/FullscreenFileEditor';
 import brandLogo from '@brand/logo.png?url';
 
@@ -261,6 +262,7 @@ export function App() {
 
       {fullscreenAgentId && <FullscreenTerminal />}
       {fullscreenFilePath && <FullscreenFileEditor />}
+      <TaskDetailOverlay />
     </div>
   );
 }

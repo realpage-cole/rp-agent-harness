@@ -93,10 +93,15 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
       setTab(ccTabRequest.tab as CCTab);
     }
   }, [ccTabRequest]);
-  // A task-card "assign" pre-fills the Floor dispatch box and jumps to it. The
-  // counter bumps so re-assigning the same card re-seeds the textarea (the seed
-  // string alone wouldn't change). { seq } makes every assign distinct.
+  // A task-detail "assign" pre-fills the Floor dispatch box and jumps to it.
+  // Seeded via the store one-shot (the detail overlay lives app-wide now);
+  // { seq } makes every assign distinct so identical text re-seeds.
   const [dispatchSeed, setDispatchSeed] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
+  const dispatchSeedRequest = useStore((s) => s.dispatchSeedRequest);
+  useEffect(() => {
+    if (!dispatchSeedRequest) return;
+    setDispatchSeed({ text: dispatchSeedRequest.text, seq: dispatchSeedRequest.seq });
+  }, [dispatchSeedRequest]);
   // Lifted so the memory-graph tab can jump to a specific agent's memory file.
   const [selectedMemoryAgent, setSelectedMemoryAgent] = useState<string | null>(null);
   const updateAgent = useStore((s) => s.updateAgent);
@@ -191,14 +196,7 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
           )
         )}
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
-        {tab === 'tasks' && (
-          <TasksKanban
-            onAssign={(prefill) => {
-              setDispatchSeed((s) => ({ text: prefill, seq: s.seq + 1 }));
-              setTab('floor');
-            }}
-          />
-        )}
+        {tab === 'tasks' && <TasksKanban />}
         {tab === 'human' && <AskMeTab />}
         {tab === 'memory' && (
           <MemoryTab godId={agent.id} who={selectedMemoryAgent ?? undefined} onWho={setSelectedMemoryAgent} />
