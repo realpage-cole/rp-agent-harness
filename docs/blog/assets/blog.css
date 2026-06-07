@@ -254,7 +254,11 @@ nav .links a:hover, nav .links a[aria-current="page"] { color: var(--ink); }
 
 /* ---------- post article ---------- */
 .post-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 48px; align-items: start; padding: 8px 0 40px; }
-@media (max-width: 980px) { .post-wrap { grid-template-columns: 1fr; } .toc-rail { display: none; } }
+/* Single column below the TOC breakpoint. Use minmax(0,1fr) (not 1fr) so the
+   track may shrink below its content's min-content — otherwise a wide, internally
+   scrollable child (e.g. a `<pre>` code block) inflates the 1fr track past the
+   viewport and the whole page overflows horizontally on phones. */
+@media (max-width: 980px) { .post-wrap { grid-template-columns: minmax(0, 1fr); } .toc-rail { display: none; } }
 
 .post-head { padding: 48px 0 8px; }
 .post-head .crumbs {
@@ -338,7 +342,10 @@ nav .links a:hover, nav .links a[aria-current="page"] { color: var(--ink); }
 .callout.note { background: var(--sky-soft); }
 .callout.tip { background: var(--mint); }
 .callout.warn { background: var(--peach); }
-.callout p { margin: 0; color: #2a2820; }
+/* min-width:0 lets the paragraph (a flex item) shrink below its content's
+   intrinsic size so long words/URLs wrap instead of widening the callout past
+   the viewport. */
+.callout p { margin: 0; color: #2a2820; min-width: 0; overflow-wrap: break-word; }
 .callout.tldr { background: var(--cream-2); box-shadow: var(--shadow-card-sm); }
 .callout.tldr .ic { color: var(--maroon); }
 .callout.tldr strong { color: var(--ink); }
