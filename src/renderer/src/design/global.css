@@ -37,6 +37,16 @@ button, input, textarea, select {
 /* Belt + suspenders for the caret: follow the ink, never the UA scheme. */
 input, textarea { caret-color: var(--cth-ink-900); }
 
+/* The MOUSE text-select pointer (the I-beam) is a different beast from the
+   caret: it comes from the OS cursor scheme, which `color-scheme` can't touch.
+   On Windows several schemes (and HiDPI variants) draw it white with a hairline
+   outline — invisible hovering over our cream inputs. Replace it with our own
+   inked I-beam wearing a cream halo, so it reads on cream AND on the dark
+   terminal. Falls back to the UA `text` cursor if SVG cursors are unavailable. */
+input, textarea, [contenteditable='true'] {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='17' height='18'><g fill='none' stroke='%23fdf6e3' stroke-width='4' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g><g fill='none' stroke='%23261d31' stroke-width='1.6' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g></svg>") 8 9, text;
+}
+
 /* Command Center tab bar scrolls horizontally when it overflows a narrow
    sidebar; hide the scrollbar (overlay on mac, hidden elsewhere) — scroll with
    trackpad / Shift+wheel, like a browser tab strip. */
