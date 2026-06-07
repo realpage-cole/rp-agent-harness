@@ -118,18 +118,31 @@ export function MemoryPanel() {
               )}
             </div>
 
-            {/* Not installed: tell the user how to enable it, nothing else. */}
+            {/* Not installed: show full self-sufficient setup so any machine can follow it. */}
             {!status?.available && (
               <div style={{
                 fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.6,
                 background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 10
               }}>
-                Meaning-based search isn’t installed yet. Enable it with:
-                <div style={{ marginTop: 6 }}>
-                  <code style={{
-                    fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-900)',
-                    background: 'var(--cth-paper-100)', padding: '2px 6px', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
-                  }}>uv tool install mempalace</code>
+                Meaning-based search isn't installed yet. Run these commands to set it up:
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <div style={{ color: 'var(--cth-ink-500)', fontSize: 11, marginBottom: 2 }}>
+                    If{' '}
+                    <code style={{ fontFamily: 'var(--cth-font-mono)', background: 'var(--cth-paper-100)', padding: '1px 4px', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>uv</code>
+                    {' '}isn't installed yet, install it first:
+                  </div>
+                  {[
+                    'curl -LsSf https://astral.sh/uv/install.sh | sh',
+                    'source ~/.zshrc  # or restart the terminal',
+                    'uv tool install mempalace',
+                  ].map((cmd) => (
+                    <code key={cmd} style={{
+                      display: 'block',
+                      fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-900)',
+                      background: 'var(--cth-paper-100)', padding: '3px 6px',
+                      boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+                    }}>{cmd}</code>
+                  ))}
                 </div>
                 <div style={{ marginTop: 8, color: 'var(--cth-ink-500)' }}>
                   Agents still keep plain notes without it.
