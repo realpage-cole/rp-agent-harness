@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, screen, shell, Notification } from 'electron';
 import { spawn } from 'node:child_process';
-import { rmSync, existsSync, readFileSync, readdirSync, statSync, cpSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, readdirSync, statSync, cpSync, writeFileSync, unlinkSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
@@ -22,7 +23,7 @@ import { PersistStore } from './db';
 import { enrichMessage } from './assistant';
 import { readAgentUsage, readContextTokens } from './transcript';
 import { listIssues, listCIRuns } from './github';
-import { SlackWebhookServer } from './slack';
+import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
 import { TelemetryCollector } from './telemetry';
 import { ControlRegistry } from './control';
 
@@ -495,6 +496,27 @@ function liveWebContents(): Electron.WebContents | null {
 // ─── Slack webhook server (Slack message → Michael's queue) ──────────────────
 /** The running Slack ingestion server, or null when disabled/stopped. */
 let slackServer: SlackWebhookServer | null = null;
+/** The loopback-only reply endpoint (lets the bundled helper post back to Slack
+ *  without ever seeing the bot token). Lifecycle is tied to `slackServer`. */
+let slackReplyServer: SlackReplyServer | null = null;
+/** Last public tunnel URL handed out — persisted so Settings can re-show the
+ *  Request URL after a reopen (Slack reuses it until the server is stopped). */
+let lastSlackUrl: string | undefined;
+
+/** Absolute path to the bundled `md-slack-reply.cjs` helper. Packaged: under
+ *  `process.resourcesPath` (electron-builder extraResources). Dev: the repo's
+ *  `resources/` dir, resolved from the app path. */
+function slackReplyScriptPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'md-slack-reply.cjs')
+    : join(app.getAppPath(), 'resources', 'md-slack-reply.cjs');
+}
+
+/** Where the helper discovers `{ port, token }` for the loopback endpoint. Kept
+ *  under userData (NOT the git repo, NOT mined into MemPalace). */
+function slackReplyConfigPath(): string {
+  return join(app.getPath('userData'), 'slack-reply.json');
+}
 
 /** Build a SlackWebhookServer from the current config and start it, replacing
  *  any running instance, and return the start result (incl. the public tunnel
@@ -512,22 +534,55 @@ async function startSlackServer(): Promise<{ ok: boolean; url?: string; error?: 
     channelId: cfg.slackChannelId,
     // Fires from the HTTP server's event loop (not the IPC thread); route through
     // liveWebContents() so a message arriving during window teardown can't throw.
-    onMessage: (text) => {
-      try { liveWebContents()?.send('slack:incomingMessage', { text }); }
+    // Forwards the full thread metadata so the renderer can ack + reply in-thread.
+    onMessage: (m) => {
+      try { liveWebContents()?.send('slack:incomingMessage', m); }
       catch { /* window torn down */ }
     }
   });
   const res = await slackServer.start();
   // ok:false means we never bound the port → drop the instance. ok:true with no
   // url just means the tunnel is unavailable; the local handler is still live.
-  if (!res.ok) slackServer = null;
+  if (!res.ok) { slackServer = null; return res; }
+  if (res.url) lastSlackUrl = res.url;
+  // Bring up the loopback reply endpoint (token-gated, never tunneled) and drop
+  // the discovery file for the bundled helper. Best-effort: reply path being
+  // unavailable must not sink ingestion.
+  await startSlackReplyServer();
   return res;
 }
 
-/** Stop and forget the Slack server. Best-effort; safe to call when not running. */
+/** Start the loopback reply endpoint and write its `{ port, token }` to userData
+ *  so `md-slack-reply.cjs` can reach it. The bot token is read lazily from config
+ *  at reply time and never written to this file. */
+async function startSlackReplyServer(): Promise<void> {
+  slackReplyServer?.stop();
+  const token = randomBytes(24).toString('hex');
+  slackReplyServer = new SlackReplyServer({
+    token,
+    getBotToken: () => readConfig().slackBotToken
+  });
+  const r = await slackReplyServer.start();
+  if (!r.ok || r.port === undefined) {
+    console.error('[slack] reply endpoint failed to start:', r.error);
+    slackReplyServer = null;
+    return;
+  }
+  try {
+    writeFileSync(slackReplyConfigPath(), JSON.stringify({ port: r.port, token }), { mode: 0o600 });
+  } catch (e) {
+    console.error('[slack] could not write reply config:', e);
+  }
+}
+
+/** Stop and forget the Slack server (+ reply endpoint). Best-effort; safe to call
+ *  when not running. The last tunnel URL is retained so Settings keeps showing it. */
 function stopSlackServer(): void {
   try { slackServer?.stop(); } catch (e) { console.error('[slack] stop failed:', e); }
   slackServer = null;
+  try { slackReplyServer?.stop(); } catch (e) { console.error('[slack] reply stop failed:', e); }
+  slackReplyServer = null;
+  try { if (existsSync(slackReplyConfigPath())) unlinkSync(slackReplyConfigPath()); } catch { /* noop */ }
 }
 
 /** The persisted main-window geometry (kv key `window.bounds`). */
@@ -1159,6 +1214,23 @@ ipcMain.handle('app:setNotifications', (_evt, val) => writeConfig({ notification
 // ─── IPC: Slack integration ─────────────────────────────────────────────────
 ipcMain.handle('slack:start', () => startSlackServer());
 ipcMain.handle('slack:stop', () => { stopSlackServer(); return { ok: true }; });
+/** Current connection state + last Request URL — lets Settings hydrate the
+ *  "Connected" badge and re-show the persisted tunnel URL on reopen. */
+ipcMain.handle('slack:status', () => ({ running: slackServer != null, url: lastSlackUrl }));
+/** Absolute path to the bundled reply helper, for the prompt the office worker
+ *  runs to post its summary back in-thread. No secret crosses this boundary. */
+ipcMain.handle('slack:replyScriptPath', () => slackReplyScriptPath());
+/** Renderer's immediate "queued" ack into the triggering Slack thread. The bot
+ *  token stays in main — only channel/thread/text cross IPC. */
+ipcMain.handle('slack:reply', (_evt, arg: unknown) => {
+  const p = (arg ?? {}) as { channel?: unknown; thread_ts?: unknown; text?: unknown };
+  const botToken = readConfig().slackBotToken;
+  if (!botToken) return { ok: false, error: 'no bot token' };
+  if (typeof p.channel !== 'string' || typeof p.thread_ts !== 'string' || typeof p.text !== 'string') {
+    return { ok: false, error: 'channel, thread_ts, text required' };
+  }
+  return postSlackReply({ botToken, channel: p.channel, thread_ts: p.thread_ts, text: p.text });
+});
 ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   const p = (patch ?? {}) as {
     signingSecret?: unknown; botToken?: unknown; channelId?: unknown; port?: unknown; enabled?: unknown;
@@ -1211,6 +1283,11 @@ function bootstrapHiveServices(): void {
 }
 
 app.whenReady().then(() => {
+  // Hand every spawned agent the path to the Slack reply discovery file via the
+  // inherited env (pty merges process.env). The path is stable whether or not the
+  // server is running; the FILE only exists while it is, so the helper degrades
+  // to "endpoint not running" cleanly. NO secret is in the env — only the path.
+  process.env.MD_SLACK_REPLY_CONFIG = slackReplyConfigPath();
   // Open the durable store first — createWindow() reads the saved window bounds.
   // Guarded: a DB failure (e.g. a bad native build) must degrade to defaults,
   // never block app startup.

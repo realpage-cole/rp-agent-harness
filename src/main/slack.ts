@@ -19,6 +19,7 @@
  * import so it can be unit-/smoke-tested as a plain Node module.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import localtunnel from 'localtunnel';
 
@@ -32,8 +33,19 @@ export interface SlackWebhookServerOptions {
   signingSecret: string;
   /** Optional channel id filter — when set, events from other channels are dropped. */
   channelId?: string;
-  /** Called once per accepted, de-mentioned message body. */
-  onMessage: (text: string) => void;
+  /** Called once per accepted, de-mentioned message — with the Slack thread
+   *  coordinates needed to reply back in the originating thread. */
+  onMessage: (m: SlackInboundMessage) => void;
+}
+
+/** A verified, de-mentioned inbound Slack message plus the coordinates needed to
+ *  reply in-thread. `thread_ts` is the original message's thread (or its own ts
+ *  when it isn't itself a reply), so office replies nest under the request. */
+export interface SlackInboundMessage {
+  text: string;
+  channel: string;
+  ts: string;
+  thread_ts: string;
 }
 
 /** Reject request bodies larger than this — Slack event payloads are tiny; the
@@ -51,7 +63,7 @@ export class SlackWebhookServer {
   private readonly port: number;
   private readonly signingSecret: string;
   private readonly channelId?: string;
-  private readonly onMessage: (text: string) => void;
+  private readonly onMessage: (m: SlackInboundMessage) => void;
 
   constructor(opts: SlackWebhookServerOptions) {
     this.port = opts.port;
@@ -168,8 +180,13 @@ export class SlackWebhookServer {
       const channelOk = !this.channelId || ev.channel === this.channelId;
       if (isPlainMessage && channelOk) {
         const text = stripLeadingMention(typeof ev.text === 'string' ? ev.text : '');
-        if (text) {
-          try { this.onMessage(text); } catch { /* delivery is best-effort */ }
+        const channel = typeof ev.channel === 'string' ? ev.channel : '';
+        const ts = typeof ev.ts === 'string' ? ev.ts : '';
+        // Reply under the original message's thread; if the event is itself a
+        // threaded reply, stay in that thread, else open one rooted at its ts.
+        const thread_ts = (typeof ev.thread_ts === 'string' && ev.thread_ts) || ts;
+        if (text && channel && ts) {
+          try { this.onMessage({ text, channel, ts, thread_ts }); } catch { /* delivery is best-effort */ }
         }
       }
     }
@@ -215,6 +232,10 @@ interface SlackPayload {
     bot_id?: string;
     channel?: string;
     text?: string;
+    /** Message timestamp — Slack's per-message id, used as the reply thread root. */
+    ts?: string;
+    /** Set when the message is itself a reply; the thread to post back into. */
+    thread_ts?: string;
   };
 }
 
@@ -225,4 +246,146 @@ function stripLeadingMention(text: string): string {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Post a reply into a Slack thread via `chat.postMessage` — a raw `node:https`
+ * POST (no `@slack/*` dep), matching the repo's zero-SDK approach. The bot token
+ * is passed in by the caller: it lives in main's config and never leaves the
+ * main process, and is NEVER logged. Resolves Slack's `{ ok, error? }`.
+ */
+export function postSlackReply(opts: {
+  botToken: string;
+  channel: string;
+  thread_ts: string;
+  text: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    if (!opts.botToken) { resolve({ ok: false, error: 'missing bot token' }); return; }
+    const body = JSON.stringify({ channel: opts.channel, thread_ts: opts.thread_ts, text: opts.text });
+    const req = httpsRequest({
+      method: 'POST',
+      hostname: 'slack.com',
+      path: '/api/chat.postMessage',
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        authorization: `Bearer ${opts.botToken}`
+      }
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { ok?: boolean; error?: string };
+          resolve({ ok: json.ok === true, error: json.error });
+        } catch { resolve({ ok: false, error: 'bad response from Slack' }); }
+      });
+    });
+    req.on('error', (e) => resolve({ ok: false, error: errMsg(e) }));
+    req.write(body);
+    req.end();
+  });
+}
+
+/** Per-session shared secret + lazy bot-token accessor for the reply endpoint. */
+export interface SlackReplyServerOptions {
+  /** Secret the helper must echo in the `x-md-reply-token` header. */
+  token: string;
+  /** Latest bot token, read lazily so a config change is picked up at reply time. */
+  getBotToken: () => string | undefined;
+}
+
+/**
+ * Loopback-only HTTP endpoint that lets a bundled helper script post a Slack
+ * reply WITHOUT ever seeing the bot token. It binds to `127.0.0.1` exclusively
+ * and is NEVER placed behind the public tunnel (only the webhook port is
+ * forwarded). Every request must carry the per-session `x-md-reply-token`
+ * header; non-loopback peers are refused even though the bind already excludes
+ * them (defense in depth). Main writes `{ port, token }` to
+ * `<userData>/slack-reply.json` so the helper can find this socket.
+ */
+export class SlackReplyServer {
+  private server: Server | null = null;
+  private readonly token: string;
+  private readonly getBotToken: () => string | undefined;
+
+  constructor(opts: SlackReplyServerOptions) {
+    this.token = opts.token;
+    this.getBotToken = opts.getBotToken;
+  }
+
+  /** Bind a loopback port (0 ⇒ OS-assigned). Resolves the actual bound port. */
+  start(preferredPort = 0): Promise<{ ok: boolean; port?: number; error?: string }> {
+    return new Promise((resolve) => {
+      if (this.server) { resolve({ ok: false, error: 'already running' }); return; }
+      const server = createServer((req, res) => this.handle(req, res));
+      const onError = (e: Error): void => { server.off('listening', onListening); resolve({ ok: false, error: errMsg(e) }); };
+      const onListening = (): void => {
+        server.off('error', onError);
+        this.server = server;
+        const addr = server.address();
+        resolve({ ok: true, port: addr && typeof addr === 'object' ? addr.port : preferredPort });
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      // '127.0.0.1' ONLY — the public tunnel forwards the webhook port, never this.
+      server.listen(preferredPort, '127.0.0.1');
+    });
+  }
+
+  /** Close the endpoint. Idempotent and best-effort. */
+  stop(): void {
+    try { this.server?.close(); } catch { /* noop */ }
+    this.server = null;
+  }
+
+  private handle(req: IncomingMessage, res: ServerResponse): void {
+    // Defense in depth: even bound loopback-only, refuse any non-loopback peer.
+    if (!isLoopback(req.socket.remoteAddress ?? '')) { res.writeHead(403); res.end(); return; }
+    if (req.method !== 'POST' || (req.url ?? '').split('?')[0] !== '/reply') {
+      res.writeHead(404); res.end(); return;
+    }
+    if (!this.checkToken(req.headers['x-md-reply-token'])) { res.writeHead(401); res.end(); return; }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let aborted = false;
+    req.on('data', (c: Buffer) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) { aborted = true; res.writeHead(413); res.end(); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (aborted) return;
+      let parsed: { channel?: string; thread_ts?: string; text?: string };
+      try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'bad json' })); return; }
+      const botToken = this.getBotToken();
+      if (!botToken) { res.writeHead(503); res.end(JSON.stringify({ ok: false, error: 'no bot token' })); return; }
+      if (!parsed.channel || !parsed.thread_ts || !parsed.text) {
+        res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'channel, thread, text required' })); return;
+      }
+      postSlackReply({ botToken, channel: parsed.channel, thread_ts: parsed.thread_ts, text: parsed.text })
+        .then((r) => { res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify(r)); })
+        .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: errMsg(e) })); });
+    });
+    req.on('error', () => { if (!aborted) { try { res.writeHead(400); res.end(); } catch { /* socket gone */ } } });
+  }
+
+  /** Constant-time match of the request's reply token against the session token. */
+  private checkToken(provided: string | string[] | undefined): boolean {
+    if (typeof provided !== 'string') return false;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(this.token);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+}
+
+/** True for IPv4 loopback (127.0.0.0/8) and IPv6 ::1 (incl. v4-mapped form). */
+function isLoopback(addr: string): boolean {
+  const a = addr.replace(/^::ffff:/, '');
+  return a === '::1' || a.startsWith('127.');
 }
