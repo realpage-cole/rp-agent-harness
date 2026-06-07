@@ -6,6 +6,7 @@ import { SpritePortrait } from './SpritePortrait';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
+import { AskMeTab } from './AskMeTab';
 import { disposeTerminal } from './terminalPool';
 import { Icon } from './Icon';
 import { MemoryGraphPanel } from './MemoryGraphPanel';
@@ -20,7 +21,7 @@ import { buildSpawnCommand, AGENT_MODELS } from '@/store/config';
  *  per-agent model + dispatch + assistant access), a memory view, and a live
  *  activity feed / board / usage meter. */
 
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'memory' | 'graph' | 'activity' | 'handbook';
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'memory' | 'graph' | 'activity' | 'handbook';
 
 /** A recurring auto-dispatched mission (mirrors the main-process config type). */
 interface ScheduledMission {
@@ -75,6 +76,7 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
   { key: 'floor', label: 'monitor', icon: 'mcp' },
   { key: 'tasks', label: 'tasks', icon: 'check' },
+  { key: 'human', label: 'ask me', icon: 'bell' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
   { key: 'graph', label: 'graph', icon: 'web' },
   { key: 'activity', label: 'activity', icon: 'bell' },
@@ -83,10 +85,23 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
 
 export function CommandCenterPanel({ agent }: { agent: Agent }) {
   const [tab, setTab] = useState<CCTab>('terminal');
-  // A task-card "assign" pre-fills the Floor dispatch box and jumps to it. The
-  // counter bumps so re-assigning the same card re-seeds the textarea (the seed
-  // string alone wouldn't change). { seq } makes every assign distinct.
+  // External tab requests (the office task board click → 'tasks'). seq-keyed so
+  // clicking the board again re-opens the tab even if it was already requested.
+  const ccTabRequest = useStore((s) => s.ccTabRequest);
+  useEffect(() => {
+    if (ccTabRequest && TABS.some((t) => t.key === ccTabRequest.tab)) {
+      setTab(ccTabRequest.tab as CCTab);
+    }
+  }, [ccTabRequest]);
+  // A task-detail "assign" pre-fills the Floor dispatch box and jumps to it.
+  // Seeded via the store one-shot (the detail overlay lives app-wide now);
+  // { seq } makes every assign distinct so identical text re-seeds.
   const [dispatchSeed, setDispatchSeed] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
+  const dispatchSeedRequest = useStore((s) => s.dispatchSeedRequest);
+  useEffect(() => {
+    if (!dispatchSeedRequest) return;
+    setDispatchSeed({ text: dispatchSeedRequest.text, seq: dispatchSeedRequest.seq });
+  }, [dispatchSeedRequest]);
   // Lifted so the memory-graph tab can jump to a specific agent's memory file.
   const [selectedMemoryAgent, setSelectedMemoryAgent] = useState<string | null>(null);
   const updateAgent = useStore((s) => s.updateAgent);
@@ -184,14 +199,8 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
           )
         )}
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
-        {tab === 'tasks' && (
-          <TasksKanban
-            onAssign={(prefill) => {
-              setDispatchSeed((s) => ({ text: prefill, seq: s.seq + 1 }));
-              setTab('floor');
-            }}
-          />
-        )}
+        {tab === 'tasks' && <TasksKanban />}
+        {tab === 'human' && <AskMeTab />}
         {tab === 'memory' && (
           <MemoryTab godId={agent.id} who={selectedMemoryAgent ?? undefined} onWho={setSelectedMemoryAgent} />
         )}

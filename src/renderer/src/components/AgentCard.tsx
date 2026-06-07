@@ -23,13 +23,18 @@ export interface AgentCardProps {
   /** The prep assistant. Same size as every other card (no special sizing). */
   isAssistant?: boolean;
   onClick?: () => void;
+  /** Number of ledger tasks this agent is actively DOING — rendered as a blue
+   *  sticky note stuck to the card. Clicking it opens the first task's detail. */
+  doingCount?: number;
+  onTaskNoteClick?: () => void;
 }
 
 const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 
 export function AgentCard({
   name, character, accent, status, project, action, progress = 0,
-  contextTokens, contextLimit, selected, isGod, onClick
+  contextTokens, contextLimit, selected, isGod, onClick,
+  doingCount = 0, onTaskNoteClick
 }: AgentCardProps) {
   // The god is always framed (stands out from the row); others only when selected.
   const framed = isGod || selected;
@@ -40,9 +45,30 @@ export function AgentCard({
       className="cth-titlebar-nodrag"
       style={{
         width: 220, minWidth: 220, height: 96,
-        padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left'
+        padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
+        position: 'relative'
       }}
     >
+      {/* The taken note, stuck to the card like on the desk: this worker is
+          actively DOING a ledger task. Click → the task's detail overlay. */}
+      {doingCount > 0 && (
+        <span
+          title={`actively working ${doingCount} task${doingCount === 1 ? '' : 's'} — click to open`}
+          onClick={(e) => { e.stopPropagation(); onTaskNoteClick?.(); }}
+          style={{
+            position: 'absolute', right: -4, bottom: -5, zIndex: 2,
+            width: 22, height: 20,
+            background: 'var(--cth-sky)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900), 2px 2px 0 rgba(26,19,32,0.25)',
+            transform: 'rotate(4deg)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)',
+            cursor: 'pointer'
+          }}
+        >
+          {doingCount > 1 ? doingCount : '✎'}
+        </span>
+      )}
       <PixelPanel
         variant={framed ? 'active' : 'default'}
         accent={framed ? accent : undefined}

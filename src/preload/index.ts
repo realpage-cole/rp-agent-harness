@@ -32,6 +32,14 @@ export interface HiveRegistry {
   agents: Record<string, HiveAgentMeta & { status: string; lastSeen: number; archived?: boolean }>;
 }
 
+/** One question→answer exchange with the human, recorded ON the task card. */
+export interface HumanQA {
+  q: string;
+  a?: string;
+  askedAt?: string;
+  answeredAt?: string;
+}
+
 /** A card on the task kanban, persisted to hive/tasks.json. */
 export interface HiveTask {
   id: string;
@@ -42,6 +50,9 @@ export interface HiveTask {
   dependsOn: string[];
   priority: number;
   createdAt: string;
+  /** First-class human feedback: god appends {q}, the harness UI fills {a};
+   *  the full history stays on the card. */
+  humanQA?: HumanQA[];
 }
 
 /** A message the router just delivered, with its resolved recipient ids. Drives

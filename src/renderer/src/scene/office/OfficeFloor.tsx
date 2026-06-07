@@ -964,6 +964,354 @@ export function OfficeFloor() {
           }
         }
       };
+      // ─── The office task boards: hive/tasks.json pinned to the wall ────────
+      // TWO cork boards hang side by side on the wall band above the open-plan
+      // desks: BLOCKERS (red) on the left, TODO (yellow) on the right — each
+      // with a colored header strip. A worker who picks a task up (doing +
+      // assignee) literally TAKES THE NOTE ALONG: it leaves the boards and
+      // sticks to that worker's desk instead. Finished tasks archive as a green
+      // stack on the little table at the end. Clicking any of it selects
+      // Michael and opens the Command Center's tasks tab.
+      const BOARD_TILE: Tile = { x: 6, y: 10 };
+      // The ensemble (two boards + archive table) is 82px wide; the wall run
+      // between the two doorways spans tiles 6..12 (112px) — center it.
+      const BOARD_CENTER_PAD = 15;
+      const NOTE_COLORS: Record<string, number> = {
+        todo: 0xf2df8a, doing: 0x9ecbf0, blocked: 0xf0a3a3, done: 0xa8e0b0
+      };
+      interface BoardTask { status: string; assignee?: string }
+      const tsB = mapRenderer.tileSize;
+      const boardG = new Graphics();
+      boardG.eventMode = 'static';
+      boardG.cursor = 'pointer';
+      boardG.position.set(BOARD_TILE.x * tsB + BOARD_CENTER_PAD, BOARD_TILE.y * tsB);
+      boardG.zIndex = (BOARD_TILE.y + 1) * tsB;
+      boardG.on('pointertap', (ev) => {
+        ev.stopPropagation();
+        const st = useStore.getState();
+        const god = st.agents.find((a) => a.isGod);
+        if (god) st.select(god.id);
+        st.requestCommandCenterTab('tasks');
+      });
+      charLayer.addChild(boardG);
+      // One small Graphics per desk currently holding a taken note.
+      const deskNoteG = new Map<string, Graphics>();
+      const clearDeskNotes = (): void => {
+        for (const g of deskNoteG.values()) { g.parent?.removeChild(g); g.destroy(); }
+        deskNoteG.clear();
+      };
+
+      /** One cork board with a colored header at local x `ox`; draws up to 12
+       *  of `notes`, overflow as a corner pile. */
+      const drawCork = (ox: number, header: number, notes: string[]): void => {
+        boardG.rect(ox, -8, 30, 22).fill(0x6e5639);        // frame
+        boardG.rect(ox + 1, -7, 28, 3).fill(header);       // header strip
+        boardG.rect(ox + 1, -4, 28, 17).fill(0xc9b083);    // cork
+        const n = Math.min(notes.length, 12);
+        for (let i = 0; i < n; i++) {
+          const x = ox + 3 + (i % 4) * 7;
+          const y = -2 + Math.floor(i / 4) * 5;
+          boardG.rect(x, y, 5, 4).fill(NOTE_COLORS[notes[i]] ?? 0xf2eddc);
+          boardG.rect(x + 2, y, 1, 1).fill(0x4a3b52);      // pin
+        }
+        if (notes.length > 12) {
+          boardG.rect(ox + 22, 8, 5, 4).fill(0xe8e0c8);
+          boardG.rect(ox + 23, 7, 5, 4).fill(0xf2eddc);
+        }
+      };
+
+      const drawTaskBoard = (tasks: BoardTask[]): void => {
+        boardG.clear();
+        clearDeskNotes();
+        const blocked = tasks.filter((t) => t.status === 'blocked').map(() => 'blocked');
+        const todoNotes: string[] = tasks.filter((t) => t.status === 'todo').map(() => 'todo');
+        let done = 0;
+        // doing → taken off the wall: pin it to the assignee's desk. Without a
+        // resolvable desk (no assignee / not on the floor) it falls back onto
+        // the TODO board as a blue note, so nothing ever silently disappears.
+        for (const t of tasks) {
+          if (t.status === 'done') { done++; continue; }
+          if (t.status !== 'doing') continue;
+          const rt = t.assignee ? runtimes.get(t.assignee) : undefined;
+          if (!rt) { todoNotes.push('doing'); continue; }
+          const desk = rt.character.getDeskTile();
+          let g = deskNoteG.get(t.assignee!);
+          if (!g) {
+            g = new Graphics();
+            g.eventMode = 'none';
+            g.position.set((desk.x - 1) * tsB + 3, (desk.y - 1) * tsB + 8);
+            g.zIndex = desk.y * tsB - 1;
+            charLayer.addChild(g);
+            deskNoteG.set(t.assignee!, g);
+          }
+          // stack multiple taken notes side by side on the same desk
+          const idx = (g as any).__count ?? 0;
+          (g as any).__count = idx + 1;
+          g.rect(idx * 7, -(idx % 2), 5, 4).fill(NOTE_COLORS.doing);
+          g.rect(idx * 7 + 2, -(idx % 2), 1, 1).fill(0x4a3b52);
+        }
+        drawCork(0, NOTE_COLORS.blocked, blocked);   // left: what's burning
+        drawCork(34, NOTE_COLORS.todo, todoNotes);   // right: what's queued
+        // The archive table: every finished task adds a green sheet to the
+        // pile (visible stack capped at 6 — beyond that it just sits proud).
+        boardG.rect(68, 6, 14, 4).fill(0xb08d5e);    // table top
+        boardG.rect(68, 10, 14, 4).fill(0x8a6f4d);   // table front
+        boardG.rect(69, 14, 2, 2).fill(0x6e5639);    // legs
+        boardG.rect(79, 14, 2, 2).fill(0x6e5639);
+        const stack = Math.min(done, 6);
+        for (let i = 0; i < stack; i++) {
+          boardG.rect(71 + (i % 2), 4 - i * 2, 8, 2)
+            .fill({ color: NOTE_COLORS.done, alpha: 1 })
+            .stroke({ color: 0x6e8f6e, width: 0.5 });
+        }
+      };
+      drawTaskBoard([]);
+
+      // ─── The ASK ME board: tasks waiting on the HUMAN, first class ─────────
+      // Hangs on the right wall run (between the second doorway and the war
+      // room): one lilac note per open question the god parked for the human.
+      // It pulses while anything waits — clicking it opens the Command Center's
+      // ASK ME tab, where the human reads the questions, answers, and the
+      // answers flow back to the god (documented on the card itself).
+      const askG = new Graphics();
+      askG.eventMode = 'static';
+      askG.cursor = 'pointer';
+      askG.position.set(14 * tsB + 25, 10 * tsB);
+      askG.zIndex = 11 * tsB;
+      askG.on('pointertap', (ev) => {
+        ev.stopPropagation();
+        const st = useStore.getState();
+        const god = st.agents.find((a) => a.isGod);
+        if (god) st.select(god.id);
+        st.requestCommandCenterTab('human');
+      });
+      charLayer.addChild(askG);
+      let askCount = 0;
+      let askPulse = 0;
+      const drawAskBoard = (pulse: number): void => {
+        askG.clear();
+        // lilac-framed board with a big "?" identity
+        askG.rect(0, -8, 30, 22).fill(0x5b4a6b);
+        askG.rect(1, -7, 28, 3).fill(0xcdb4e8);
+        askG.rect(1, -4, 28, 17).fill(0xc9b083);
+        if (askCount === 0) {
+          // quiet: a faint "?" watermark
+          askG.rect(13, -1, 4, 2).fill({ color: 0x8a755f, alpha: 0.8 });
+          askG.rect(15, 1, 2, 4).fill({ color: 0x8a755f, alpha: 0.8 });
+          askG.rect(15, 7, 2, 2).fill({ color: 0x8a755f, alpha: 0.8 });
+        } else {
+          const n = Math.min(askCount, 8);
+          for (let i = 0; i < n; i++) {
+            const x = 3 + (i % 4) * 7;
+            const y = -2 + Math.floor(i / 4) * 6;
+            askG.rect(x, y, 5, 4).fill(0xcdb4e8);
+            askG.rect(x + 2, y, 1, 1).fill(0x4a3b52);
+          }
+          // attention pulse around the frame while questions wait
+          const a = 0.35 + 0.3 * Math.sin(pulse * 4);
+          askG.rect(-2, -10, 34, 26).stroke({ color: 0xcdb4e8, width: 2, alpha: a });
+        }
+      };
+      drawAskBoard(0);
+
+      // ─── Board choreography: every ledger move is ACTED on the floor ───────
+      // Michael walks over and pins fresh cards; an assigned worker walks to
+      // the TODO board, takes its note and carries it home; finishing carries
+      // the note to the archive table; a card going blocked gets walked to the
+      // red board. While a move is in flight, the boards keep showing the OLD
+      // state for that card — the redraw lands exactly when the actor acts.
+      // Un-choreographable diffs (no actor on the floor, bulk edits, restarts)
+      // simply redraw — animation is sugar, the ledger stays the truth.
+      interface LedgerTask extends BoardTask { id: string }
+      interface BoardMove {
+        kind: 'pin' | 'take' | 'archive';
+        taskId: string;
+        actorId: string;
+        /** What this card should look like in visualTasks once the move lands. */
+        after: BoardTask;
+        carryColor: number;
+        stand: Tile;
+        thought: string;
+      }
+      const PIN_STAND: Tile = { x: 8, y: 11 };      // under the blockers board
+      const TAKE_STAND: Tile = { x: 9, y: 11 };     // under the todo board
+      const ARCHIVE_STAND: Tile = { x: 12, y: 11 }; // beside the archive table
+      /** What the boards currently SHOW (lags the ledger while moves play). */
+      let visualTasks = new Map<string, BoardTask>();
+      const moveQueue: BoardMove[] = [];
+      const busyActors = new Set<string>();
+      // The note riding in an actor's hand, floor-side so it needs no Character
+      // support: one tiny Graphics per active move, repositioned every tick.
+      const carriedNotes = new Map<string, Graphics>();
+
+      const redrawVisual = (): void => drawTaskBoard([...visualTasks.values()]);
+
+      const finishMove = (mv: BoardMove, rt: Runtime | undefined): void => {
+        visualTasks.set(mv.taskId, mv.after);
+        redrawVisual();
+        busyActors.delete(mv.actorId);
+        const g = carriedNotes.get(mv.actorId);
+        if (g) { g.parent?.removeChild(g); g.destroy(); carriedNotes.delete(mv.actorId); }
+        if (rt) {
+          rt.character.hideThought();
+          const agent = agentById(mv.actorId);
+          if (agent) applyState(agent, rt, true); // land in the right pose
+        }
+      };
+
+      const attachCarriedNote = (actorId: string, color: number): void => {
+        if (carriedNotes.has(actorId)) return;
+        const g = new Graphics();
+        g.eventMode = 'none';
+        g.rect(0, 0, 5, 4).fill(color);
+        g.rect(2, 0, 1, 1).fill(0x4a3b52);
+        charLayer.addChild(g);
+        carriedNotes.set(actorId, g);
+      };
+
+      const startMove = (mv: BoardMove): void => {
+        const rt = runtimes.get(mv.actorId);
+        if (!rt) { finishMove(mv, undefined); return; }
+        busyActors.add(mv.actorId);
+        const c = rt.character;
+        if (mv.kind === 'archive') {
+          // picks the note up at its desk before walking — in hand, off the desk
+          attachCarriedNote(mv.actorId, mv.carryColor);
+          visualTasks.set(mv.taskId, { status: '__carried__' });
+          redrawVisual();
+        }
+        c.showThought(mv.thought);
+        c.walkToAndThen(mv.stand, () => {
+          c.faceDirection('up');
+          if (mv.kind === 'take') attachCarriedNote(mv.actorId, mv.carryColor);
+          // brief acting beat, then the boards update under their hands
+          setTimeout(() => {
+            if (mv.kind === 'take') {
+              // carry it home: the desk note appears on arrival via finishMove
+              const rt2 = runtimes.get(mv.actorId);
+              if (!rt2) { finishMove(mv, undefined); return; }
+              visualTasks.set(mv.taskId, { ...mv.after, status: '__carried__' });
+              redrawVisual();
+              rt2.character.walkToAndThen(rt2.character.getDeskTile(), () => finishMove(mv, rt2));
+              // watchdog below also covers this leg
+            } else {
+              finishMove(mv, runtimes.get(mv.actorId));
+            }
+          }, 900);
+        });
+      };
+
+      let moveWatchdog = 0;
+      const updateBoardMoves = (dt: number): void => {
+        // carried notes ride at the actor's hand
+        for (const [id, g] of carriedNotes) {
+          const rt = runtimes.get(id);
+          if (!rt) continue;
+          const p = rt.character.getPixelPosition();
+          g.position.set(p.x + 5, p.y - 10);
+          g.zIndex = p.y + 1;
+        }
+        // start queued moves whose actor is free
+        for (let i = moveQueue.length - 1; i >= 0; i--) {
+          if (!busyActors.has(moveQueue[i].actorId)) {
+            const mv = moveQueue.splice(i, 1)[0];
+            startMove(mv);
+          }
+        }
+        // the ASK ME board pulses for attention while questions wait
+        askPulse += dt;
+        if (askCount > 0) drawAskBoard(askPulse);
+        // global watchdog: if anything has been in flight too long, hard-sync
+        moveWatchdog += dt;
+        if (moveWatchdog > 30 && busyActors.size > 0) {
+          moveWatchdog = 0;
+          for (const id of [...busyActors]) {
+            busyActors.delete(id);
+            const g = carriedNotes.get(id);
+            if (g) { g.parent?.removeChild(g); g.destroy(); carriedNotes.delete(id); }
+          }
+          visualTasks = new Map(lastLedger.map((t) => [t.id, { status: t.status, assignee: t.assignee }]));
+          redrawVisual();
+        }
+      };
+
+      /** Pick who performs a ledger change: the assignee if on the floor, the
+       *  god for fresh pins / orphan cards. Returns undefined → instant redraw. */
+      const actorFor = (assignee: string | undefined, preferGod: boolean): string | undefined => {
+        if (!preferGod && assignee && runtimes.has(assignee)) return assignee;
+        const god = useStore.getState().agents.find((a) => a.isGod);
+        return god && runtimes.has(god.id) ? god.id : undefined;
+      };
+
+      let lastLedger: LedgerTask[] = [];
+      let firstPoll = true;
+      const pollTaskBoard = async (): Promise<void> => {
+        try {
+          const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string; humanQA?: Array<{ q?: string; a?: string }> }> } | null;
+          const arr = (raw && Array.isArray(raw.tasks)) ? raw.tasks : [];
+          const ledger: LedgerTask[] = arr.map((t, i) => ({
+            id: typeof t?.id === 'string' && t.id ? t.id : `idx-${i}`,
+            status: String(t?.status ?? 'todo'),
+            assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
+          }));
+          // tasks waiting on the HUMAN feed the ASK ME board's note count
+          const newAsk = arr.filter((t) =>
+            String(t?.status) === 'blocked'
+            && Array.isArray(t?.humanQA)
+            && t!.humanQA!.some((e) => e && typeof e.q === 'string' && !e.a)
+          ).length;
+          if (newAsk !== askCount) {
+            askCount = newAsk;
+            drawAskBoard(askPulse);
+          }
+          if (firstPoll) {
+            // cold start: no theatre, just show the truth
+            firstPoll = false;
+            visualTasks = new Map(ledger.map((t) => [t.id, { status: t.status, assignee: t.assignee }]));
+            redrawVisual();
+            lastLedger = ledger;
+            return;
+          }
+          const prev = new Map(lastLedger.map((t) => [t.id, t]));
+          let instant = false;
+          for (const t of ledger) {
+            const old = prev.get(t.id);
+            const oldS = old?.status;
+            if (oldS === t.status && old?.assignee === t.assignee) continue;
+            const after: BoardTask = { status: t.status, assignee: t.assignee };
+            let mv: BoardMove | null = null;
+            if (!old && (t.status === 'todo' || t.status === 'blocked')) {
+              const actor = actorFor(undefined, true);
+              if (actor) mv = { kind: 'pin', taskId: t.id, actorId: actor, after, carryColor: NOTE_COLORS[t.status], stand: t.status === 'blocked' ? PIN_STAND : TAKE_STAND, thought: 'pinning a new task 📌' };
+            } else if (oldS !== 'doing' && t.status === 'doing') {
+              const actor = actorFor(t.assignee, false);
+              if (actor && actor === t.assignee) mv = { kind: 'take', taskId: t.id, actorId: actor, after, carryColor: NOTE_COLORS.doing, stand: TAKE_STAND, thought: 'grabbing my task' };
+            } else if (t.status === 'done' && oldS !== 'done') {
+              const actor = actorFor(old?.assignee ?? t.assignee, false);
+              if (actor) mv = { kind: 'archive', taskId: t.id, actorId: actor, after, carryColor: NOTE_COLORS.done, stand: ARCHIVE_STAND, thought: 'filing it as done ✔' };
+            } else if (t.status === 'blocked' && oldS !== 'blocked') {
+              const actor = actorFor(old?.assignee ?? t.assignee, false);
+              if (actor) mv = { kind: 'pin', taskId: t.id, actorId: actor, after, carryColor: NOTE_COLORS.blocked, stand: PIN_STAND, thought: 'this one is stuck 😤' };
+            }
+            if (mv && !busyActors.has(mv.actorId) && !moveQueue.some((q) => q.actorId === mv!.actorId)) {
+              if (!visualTasks.has(t.id) && mv.kind !== 'pin') visualTasks.set(t.id, { status: oldS ?? 'todo', assignee: old?.assignee });
+              moveQueue.push(mv);
+            } else {
+              visualTasks.set(t.id, after);
+              instant = true;
+            }
+          }
+          // removed cards vanish without theatre
+          for (const id of [...visualTasks.keys()]) {
+            if (!ledger.some((t) => t.id === id)) { visualTasks.delete(id); instant = true; }
+          }
+          if (instant) redrawVisual();
+          lastLedger = ledger;
+        } catch { /* keep the last drawing */ }
+      };
+      void pollTaskBoard();
+      const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 5000);
+      (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
         const charName = CAST_BY_NAME[agent.character] ? agent.character : DEFAULT_CHARACTER;
@@ -1279,6 +1627,7 @@ export function OfficeFloor() {
         updateErrands(dt);
         updateBossAura(dt);
         updateDeskLife(dt);
+        updateBoardMoves(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {
           if (envelopes[i].update(dt)) {
@@ -1319,6 +1668,7 @@ export function OfficeFloor() {
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__offMessage?.(); } catch { /* noop */ }
+        try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
         safeDestroy(a);
       }
       appRef.current = null;

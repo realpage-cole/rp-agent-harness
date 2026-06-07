@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AgentCard } from './AgentCard';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
@@ -17,7 +17,30 @@ export function AgentStrip({ config }: AgentStripProps) {
   const selectedId = useStore(s => s.selectedId);
   const select = useStore(s => s.select);
   const setAddAgentOpen = useStore(s => s.setAddAgentOpen);
+  const openTaskDetail = useStore(s => s.openTaskDetail);
   const [restoring, setRestoring] = useState(false);
+  // Each worker's actively-DOING ledger tasks, polled from hive/tasks.json —
+  // rendered as a sticky note on the avatar card (click → task detail).
+  const [doingByAgent, setDoingByAgent] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string }> } | null;
+        if (cancelled) return;
+        const map: Record<string, string[]> = {};
+        for (const t of (raw && Array.isArray(raw.tasks)) ? raw.tasks : []) {
+          if (t?.status === 'doing' && typeof t.assignee === 'string' && t.assignee && typeof t.id === 'string') {
+            (map[t.assignee] = map[t.assignee] ?? []).push(t.id);
+          }
+        }
+        setDoingByAgent(map);
+      } catch { /* keep last good */ }
+    };
+    void poll();
+    const iv = setInterval(() => { void poll(); }, 5000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
 
   /** Respawn every worker from the previous session with its ORIGINAL agent id,
    *  cwd, model and command — the hive workspace (memory.md, inbox, registry
@@ -97,6 +120,11 @@ export function AgentStrip({ config }: AgentStripProps) {
           isGod={a.isGod}
           isAssistant={a.isAssistant}
           onClick={() => select(a.id)}
+          doingCount={doingByAgent[a.id]?.length ?? 0}
+          onTaskNoteClick={() => {
+            const first = doingByAgent[a.id]?.[0];
+            if (first) openTaskDetail(first);
+          }}
         />
       ))}
       {restorableAgents.length > 0 && (
