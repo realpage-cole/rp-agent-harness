@@ -563,21 +563,6 @@ export class HiveManager {
       : [resolveTo(msg.to)].filter((t) => t !== msg.from);
     for (const t of targets) {
       const target = reg.agents[t];
-      // Enforce the assistant's send-only contract AT THE ROUTER: it has no
-      // composer, is excluded from the inbox-wake nudge, and never reads an
-      // inbox — yet direct mail used to be delivered there anyway, where it
-      // rotted unread (observed live: a task brief plus the follow-up
-      // reprimand about the unread inbox, both unread for hours). Bounce such
-      // mail to god instead, so the sender's intent surfaces immediately and
-      // nothing is silently lost.
-      if (target?.isAssistant) {
-        this.deliver({
-          ...msg,
-          to: godId,
-          subject: `[bounced — "${t}" is the send-only prep assistant; route work to a real agent] ${msg.subject}`
-        }, godId);
-        continue;
-      }
       if (target && !isClaudeProvider(target.provider ?? 'claude')) {
         this.deliver({
           ...msg,

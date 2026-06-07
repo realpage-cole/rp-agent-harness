@@ -571,9 +571,9 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
 
       <ArchivedSection />
 
-      <Section title="ASSISTANT">
+      <Section title="ENRICH">
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 13, color: 'var(--cth-ink-700)' }}>Route Michael's queue through Dwight</span>
+          <span style={{ fontSize: 13, color: 'var(--cth-ink-700)' }}>Enrich prompts with Haiku before Michael</span>
           <button
             onClick={() => setEnrichEnabled(!enrichEnabled)}
             style={{

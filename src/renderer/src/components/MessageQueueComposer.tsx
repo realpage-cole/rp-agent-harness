@@ -15,8 +15,9 @@ export interface MessageQueueComposerProps {
  * TUI one-by-one as soon as it goes idle (see useHive's flush loop).
  *
  * For Michael, a global "enrich" toggle decides routing: OFF → messages type
- * straight into Michael; ON → they're routed through the assistant ("Dwight"),
- * which gathers repo context and forwards an improved prompt to Michael.
+ * straight into Michael; ON → a headless Haiku call enriches the prompt with
+ * repo context before it reaches Michael. Messages show 'enriching…' in the
+ * queue while the Haiku call is in flight.
  */
 export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const queue = useStore((s) => s.messageQueues[agent.id]) ?? EMPTY_QUEUE;
@@ -32,7 +33,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const setDraft = useStore((s) => s.setDraft);
   const setText = (t: string) => setDraft(agent.id, t);
 
-  // The enrich toggle governs Michael's queue (it routes through the assistant).
+  // The enrich toggle governs Michael's queue (headless Haiku enrichment).
   const showEnrichToggle = !!agent.isGod;
 
   const idle = agent.status === 'idle';
@@ -53,7 +54,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const statusHint = queue.length === 0
     ? null
     : showEnrichToggle && enrichEnabled
-    ? `→ Dwight (enrich) → Michael · ${queue.length} queued`
+    ? `Haiku enriching → Michael · ${queue.length} queued`
     : idle
     ? `sending to ${agent.name} one-by-one…`
     : `${agent.name} is busy — ${queue.length} queued`;
@@ -114,28 +115,32 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
             <div key={m.id} style={{
               display: 'flex', alignItems: 'flex-start', gap: 6,
               padding: '4px 6px',
-              background: 'var(--cth-paper-100)',
-              boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+              background: m.enriching ? 'var(--cth-lemon-light)' : 'var(--cth-paper-100)',
+              boxShadow: `inset 0 0 0 1px ${m.enriching ? 'var(--cth-lemon)' : 'var(--cth-ink-300)'}`
             }}>
               <span style={{
                 fontFamily: 'var(--cth-font-mono)', fontSize: 12,
                 color: 'var(--cth-ink-500)', lineHeight: '18px', flexShrink: 0
-              }}>{i + 1}.</span>
+              }}>{m.enriching ? <Icon name="sparkle" /> : `${i + 1}.`}</span>
               <div
                 title={m.text}
                 style={{
                   flex: 1, minWidth: 0,
-                  fontSize: 13, lineHeight: '18px', color: 'var(--cth-ink-900)',
+                  fontSize: 13, lineHeight: '18px',
+                  color: m.enriching ? 'var(--cth-ink-700)' : 'var(--cth-ink-900)',
+                  fontStyle: m.enriching ? 'italic' : 'normal',
                   display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                   overflow: 'hidden', whiteSpace: 'pre-wrap', wordBreak: 'break-word'
                 }}
-              >{m.text}</div>
+              >{m.enriching ? 'enriching prompt…' : m.text}</div>
               <button
                 onClick={() => removeQueuedMessage(agent.id, m.id)}
                 title="Remove from queue"
+                disabled={m.enriching}
                 style={{
                   flexShrink: 0, border: 'none', background: 'transparent',
-                  cursor: 'pointer', color: 'var(--cth-ink-500)', padding: 0,
+                  cursor: m.enriching ? 'default' : 'pointer',
+                  color: m.enriching ? 'var(--cth-ink-300)' : 'var(--cth-ink-500)', padding: 0,
                   display: 'inline-flex', alignItems: 'center'
                 }}
               >

@@ -87,12 +87,15 @@ export interface FeedEntry {
 /** A message the user has parked for an agent while its terminal was busy.
  *  Queued messages are drained one at a time when the agent next goes idle (see
  *  useHive's flush loop). For Michael's queue the enrich toggle decides whether
- *  each one is typed into Michael directly or routed through the assistant. */
+ *  each one is sent through headless Haiku enrichment or typed in directly. */
 export interface QueuedMessage {
   id: string;
   text: string;
   /** epoch ms the message was queued — drives ordering and the "queued 2m ago" hint */
   ts: number;
+  /** True while headless Haiku enrichment is in flight. Prevents double-dispatch;
+   *  the message stays visible in the queue with an 'enriching…' indicator. */
+  enriching?: boolean;
 }
 
 export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces';
@@ -175,6 +178,9 @@ interface State {
   enqueueMessage: (agentId: string, text: string) => void;
   /** Drop a single queued message (user removed it, or it was just delivered). */
   removeQueuedMessage: (agentId: string, messageId: string) => void;
+  /** Mark a queued message as enriching (in-flight Haiku call). Prevents the
+   *  drain from double-dispatching it while enrichment is in progress. */
+  markMessageEnriching: (agentId: string, messageId: string) => void;
   /** Clear an agent's entire pending queue. */
   clearQueue: (agentId: string) => void;
   setAddAgentOpen: (open: boolean) => void;
@@ -486,6 +492,16 @@ export const useStore = create<State>((set) => ({
       const messageQueues = { ...s.messageQueues, [agentId]: next };
       persistQueues(messageQueues);
       return { messageQueues };
+    }),
+  markMessageEnriching: (agentId, messageId) =>
+    set((s) => {
+      const q = s.messageQueues[agentId];
+      if (!q) return s;
+      const idx = q.findIndex((m) => m.id === messageId);
+      if (idx === -1) return s;
+      const updated = [...q];
+      updated[idx] = { ...updated[idx], enriching: true };
+      return { messageQueues: { ...s.messageQueues, [agentId]: updated } };
     }),
   clearQueue: (agentId) =>
     set((s) => {

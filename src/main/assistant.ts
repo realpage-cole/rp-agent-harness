@@ -5,9 +5,9 @@ import { resolveCommand, userShellPath } from './shellEnv';
 /**
  * Michael's silent prep assistant.
  *
- * Runs a one-shot, headless `claude -p` session (Sonnet, 1M context) that NEVER
- * appears on the office floor or in the agent list. Given a short, possibly
- * vague instruction the user parked for Michael, it locates the relevant project
+ * Runs a one-shot, headless `claude -p` session (Haiku) that NEVER appears on
+ * the office floor or in the agent list. Given a short, possibly vague
+ * instruction the user parked for Michael, it locates the relevant project
  * directory (it starts in Michael's home and can read every registered repo),
  * gathers concrete context read-only, and rewrites the instruction into a
  * single self-contained prompt Michael can execute autonomously.
@@ -16,9 +16,8 @@ import { resolveCommand, userShellPath } from './shellEnv';
  * delivers the enriched prompt to Michael with no extra plumbing.
  */
 
-/** Sonnet with the 1M-token context window — chosen for cheap, large-context
- *  context-gathering that won't compete with Michael's own (Opus) session. */
-const ASSISTANT_MODEL = 'claude-sonnet-4-6[1m]';
+/** Haiku 4.5 — fast, cheap, and works without usage credits by default. */
+const ASSISTANT_MODEL = 'claude-haiku-4-5';
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 

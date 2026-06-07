@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import { useStore, type Agent, type StationKind, type ToolKind } from '@/store/store';
 import {
   buildSpawnCommand,
-  ASSISTANT_MODEL,
   inferAgentProvider,
   isClaudeProvider,
   type HarnessConfig
@@ -10,8 +9,6 @@ import {
 
 const GOD_ID = 'god';
 const GOD_PTY = `pty-${GOD_ID}`;
-const ASSISTANT_ID = 'assistant';
-const ASSISTANT_PTY = `pty-${ASSISTANT_ID}`;
 
 // How long to let Claude Code's TUI finish booting before we type the first
 // thing into Michael's terminal, and how long to PAUSE after the /remote-control
@@ -80,17 +77,6 @@ function submitToPty(ptyId: string, text: string, settleMs = 250): Promise<void>
   return next;
 }
 
-/** Wrap a user message as an enrich task for the assistant. The assistant's
- *  system prompt has the full instructions; this just frames the one task. */
-function enrichTaskPrompt(text: string): string {
-  return [
-    `ENRICH TASK: ${text}`,
-    '',
-    '(Identify the relevant project, cd in, gather READ-ONLY context, then send the improved,',
-    'self-contained prompt to Michael via an outbox message with "to":"god". Do not do the task yourself.)'
-  ].join('\n');
-}
-
 /** Tool name → where the avatar walks + what it carries. */
 const TOOL_STATION: Record<string, { station: StationKind; carry?: ToolKind }> = {
   Read: { station: 'shelf', carry: 'Read' },
@@ -131,17 +117,13 @@ export function useHive(config: HarnessConfig | null): void {
   // 'working' (there's a short window where it still reads 'idle' right after we
   // type into it). One message per cooldown keeps delivery strictly one-by-one.
   const lastFlush = useRef<Record<string, number>>({});
-  // In-flight spawn guards so a re-render / StrictMode double-mount can't spawn
-  // Michael or the assistant twice (the window between the listPtys check and
-  // the spawnPty call is otherwise racy).
+  // In-flight spawn guard so a re-render / StrictMode double-mount can't spawn
+  // Michael twice (the window between the listPtys check and spawnPty is racy).
   const godSpawning = useRef(false);
-  const assistantSpawning = useRef(false);
   // Per-agent timestamp until which auto-typers (inbox-wake #3, queue-drain #4)
   // must leave the agent alone — set while its boot sequence is typing so nothing
   // collides with /remote-control + the orientation prompt.
   const bootGraceUntil = useRef<Record<string, number>>({});
-  // Reactive so the assistant bootstrap (effect #1b) re-runs once Michael is ready.
-  const godStatus = useStore((s) => s.godStatus);
   // #5C/#7C.4 — latest circuit-breaker level per agent. When 'constrained'/
   // 'stopped' the avatar is pinned to 'looping' and hook events must NOT flip it
   // back to 'working' (the flicker the spec calls out); only a genuine Stop clears it.
@@ -221,62 +203,6 @@ export function useHive(config: HarnessConfig | null): void {
     }, 1200);
     return () => { cancelled = true; clearTimeout(t); timers.forEach(clearTimeout); };
   }, [config?.onboardingComplete, config?.harnessHome]);
-
-  // 1b) Bootstrap Michael's prep assistant ("Dwight") — only after Michael is
-  //     ready, and only once. Same live-PTY idempotency + spawn-guard as #1.
-  useEffect(() => {
-    if (!config?.onboardingComplete || !config.harnessHome) return;
-    if (godStatus !== 'ready') return;
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      if (cancelled) return;
-      const live = await window.cth.listPtys().catch(() => []);
-      if (live.some((p) => p.id === ASSISTANT_PTY)) return; // already running
-      if (cancelled || assistantSpawning.current) return;
-      assistantSpawning.current = true;
-      useStore.getState().removeAgent(ASSISTANT_ID); // clear any stale restored entry
-
-      const command = buildSpawnCommand(config, ASSISTANT_MODEL, 'claude');
-      const [exe, ...args] = command.trim().split(/\s+/);
-      const res = await window.cth.spawnPty({
-        id: ASSISTANT_PTY,
-        cwd: config.harnessHome!,
-        command: exe,
-        provider: 'claude',
-        args,
-        cols: 100,
-        rows: 30,
-        hive: { id: ASSISTANT_ID, name: 'Dwight', provider: 'claude', cwd: config.harnessHome!, isAssistant: true, role: "Michael's prep assistant" }
-      });
-      if (cancelled || !res.ok) { assistantSpawning.current = false; return; }
-      const assistant: Agent = {
-        id: ASSISTANT_ID,
-        name: 'Dwight',
-        character: 'dwight',
-        accent: 'sky',
-        description: "assistant — enriches prompts with repo context, forwards them to Michael",
-        project: 'hive',
-        tmuxTarget: '',
-        cwd: config.harnessHome!,
-        status: 'idle',
-        action: 'standing by',
-        progress: 0,
-        currentStation: 'desk',
-        ptyId: ASSISTANT_PTY,
-        command: command.trim(),
-        provider: 'claude',
-        model: ASSISTANT_MODEL,
-        isAssistant: true,
-        recentTextTs: Date.now()
-      };
-      // addAgent auto-selects the new agent; restore the prior selection so the
-      // assistant booting in the background doesn't yank focus off Michael.
-      const prevSel = useStore.getState().selectedId;
-      useStore.getState().addAgent(assistant);
-      useStore.getState().select(prevSel ?? GOD_ID);
-    }, 400);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [config?.onboardingComplete, config?.harnessHome, godStatus]);
 
   // 2) Drive avatars from real hook events emitted by each agent's shim.
   useEffect(() => {
@@ -436,22 +362,6 @@ export function useHive(config: HarnessConfig | null): void {
     return () => clearInterval(iv);
   }, [config?.onboardingComplete]);
 
-  // 3b) Closing time: the hive mail rails cover god + workers, but the prep
-  //     assistant is send-only (no inbox) — the god is even told NOT to wait
-  //     for it. So when the protocol starts, the harness itself asks the
-  //     assistant to save its memory, best-effort, directly via its terminal.
-  useEffect(() => {
-    return window.cth.onClosingTime?.((ev) => {
-      if (ev.phase !== 'started') return;
-      const asst = useStore.getState().agents.find((a) => a.isAssistant && a.ptyId);
-      if (!asst?.ptyId) return;
-      void submitToPty(
-        asst.ptyId,
-        'CLOSING TIME — the harness is shutting down. Append your durable learnings and any in-progress context to your memory.md NOW, then stop. Do not start new work.'
-      );
-    });
-  }, []);
-
   // 4) Drain each agent's queued messages to its terminal, one at a time, the
   //    moment the agent goes idle. This is what lets the user keep sending
   //    messages while the agent's "cloud terminal" is mid-run: the messages
@@ -485,11 +395,11 @@ export function useHive(config: HarnessConfig | null): void {
     };
 
     const flush = () => {
-      const { agents, messageQueues, enrichEnabled } = useStore.getState();
+      const { agents, messageQueues, enrichEnabled, markMessageEnriching, removeQueuedMessage, enqueueMessage } = useStore.getState();
       const byId = (id: string) => agents.find((a) => a.id === id);
 
-      // Sub-agents (and the assistant's own direct queue): flush verbatim into
-      // their own terminal. Michael's queue is handled specially below.
+      // Sub-agents: flush verbatim into their own terminal. Michael's queue is
+      // handled separately below.
       for (const a of agents) {
         if (a.id === GOD_ID) continue;
         if (!a.ptyId || a.status !== 'idle') continue;
@@ -497,14 +407,31 @@ export function useHive(config: HarnessConfig | null): void {
         dispatch(a.id, a);
       }
 
-      // Michael's queue: enrich OFF → straight to Michael; enrich ON → wrap as an
-      // ENRICH TASK and route to the assistant, which forwards to Michael's inbox.
-      // A slash command (e.g. a queued /compact) is NEVER enriched — it must hit
-      // Michael's own session verbatim.
+      // Michael's queue: enrich OFF → straight to Michael; enrich ON → headless
+      // Haiku call (assistant:enrich IPC) that replaces the raw text with an
+      // enriched prompt. Slash commands (e.g. /compact) are NEVER enriched.
+      // An in-flight enrichment is flagged .enriching = true — skip it so flush
+      // can't double-dispatch while the async Haiku call is running.
       if (messageQueues[GOD_ID]?.length) {
-        const isCmd = messageQueues[GOD_ID][0].text.startsWith('/');
-        if (enrichEnabled && !isCmd) dispatch(GOD_ID, byId(ASSISTANT_ID), enrichTaskPrompt);
-        else dispatch(GOD_ID, byId(GOD_ID));
+        const next = messageQueues[GOD_ID][0];
+        if (!next.enriching) {
+          const isCmd = next.text.startsWith('/');
+          if (enrichEnabled && !isCmd) {
+            markMessageEnriching(GOD_ID, next.id);
+            const god = byId(GOD_ID);
+            window.cth.enrichMessage({ message: next.text, cwd: god?.cwd ?? '' })
+              .then((res) => {
+                removeQueuedMessage(GOD_ID, next.id);
+                enqueueMessage(GOD_ID, res.ok && res.prompt ? res.prompt : next.text);
+              })
+              .catch(() => {
+                removeQueuedMessage(GOD_ID, next.id);
+                enqueueMessage(GOD_ID, next.text);
+              });
+          } else {
+            dispatch(GOD_ID, byId(GOD_ID));
+          }
+        }
       }
     };
 
