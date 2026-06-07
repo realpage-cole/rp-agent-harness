@@ -1,0 +1,191 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { PixelButton } from './PixelButton';
+import { PixelBadge } from './PixelBadge';
+import { useStore } from '@/store/store';
+import { type HiveTask, openQuestion, waitsOnHuman } from './TasksKanban';
+
+/**
+ * ASK ME — first-class human feedback through the task system.
+ *
+ * Tasks the god can only move with the human's input sit here: each card shows
+ * its open question, a place to answer, and the CASCADE of downstream tasks
+ * that are stuck waiting on this one — so "why isn't X done?" reads as "ah,
+ * because I still owe an answer here."
+ *
+ * Sending an answer does two things atomically-ish:
+ *   1. writes it into the card's humanQA entry in hive/tasks.json (the
+ *      decision is documented ON the task, forever), and
+ *   2. mails the god so it picks the answer up, unblocks the card, and the
+ *      work continues — no separate HumanQuestion.md side-channel anymore.
+ */
+
+const POLL_MS = 5000;
+
+function parse(raw: unknown): HiveTask[] {
+  const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
+    ? (raw as { tasks: HiveTask[] }).tasks
+    : [];
+  return list.filter((t) => !!t && typeof t === 'object');
+}
+
+/** All tasks transitively waiting on `id` (dependents chain), cycle-safe. */
+function dependentsTree(id: string, all: HiveTask[], seen = new Set<string>()): HiveTask[] {
+  if (seen.has(id)) return [];
+  seen.add(id);
+  const direct = all.filter((t) => Array.isArray(t.dependsOn) && t.dependsOn.includes(id) && t.status !== 'done');
+  return direct.flatMap((d) => [d, ...dependentsTree(d.id, all, seen)]);
+}
+
+export function AskMeTab() {
+  const agents = useStore((s) => s.agents);
+  const restorable = useStore((s) => s.restorableAgents);
+  const [tasks, setTasks] = useState<HiveTask[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [sending, setSending] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refresh = useCallback(async () => {
+    try { setTasks(parse(await window.cth.hiveTasks())); } catch { /* keep last good */ }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    timer.current = setInterval(refresh, POLL_MS);
+    return () => { if (timer.current) clearInterval(timer.current); };
+  }, [refresh]);
+
+  const nameFor = (id?: string): string | undefined =>
+    id ? (agents.find((a) => a.id === id)?.name ?? restorable.find((a) => a.id === id)?.name ?? id) : undefined;
+
+  const waiting = tasks.filter(waitsOnHuman);
+
+  const sendAnswer = async (task: HiveTask) => {
+    const text = (drafts[task.id] ?? '').trim();
+    const open = openQuestion(task);
+    if (!text || !open || sending) return;
+    setSending(task.id);
+    try {
+      // 1) Document the answer ON the card.
+      const next = tasks.map((t) => {
+        if (t.id !== task.id) return t;
+        const qa = (t.humanQA ?? []).map((e) =>
+          e === open || (e.q === open.q && !e.a)
+            ? { ...e, a: text, answeredAt: new Date().toISOString() }
+            : e
+        );
+        return { ...t, humanQA: qa };
+      });
+      await window.cth.hiveWriteTasks(next);
+      setTasks(next);
+      // 2) Tell the god, so the card gets unblocked and work continues.
+      await window.cth.hiveSend({
+        to: 'god',
+        act: 'inform',
+        subject: `HUMAN ANSWER on task "${task.title}"`,
+        body: [
+          `The human answered the open question on task ${task.id} ("${task.title}"):`,
+          `Q: ${open.q}`,
+          `A: ${text}`,
+          'The answer is also recorded in the card\'s humanQA. Act on it, unblock the card, and continue the work.'
+        ].join('\n')
+      }, 'human');
+      setDrafts((d) => ({ ...d, [task.id]: '' }));
+    } catch { /* leave the draft so the user can retry */ }
+    setSending(null);
+  };
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--cth-paper-200)', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {waiting.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '24px 12px', color: 'var(--cth-ink-500)', fontSize: 13 }}>
+          Nothing needs you right now. 🌿<br />
+          <span style={{ fontSize: 11, color: 'var(--cth-ink-300)' }}>
+            When the team blocks a task on your input, it shows up here (and on the ASK ME board on the floor).
+          </span>
+        </div>
+      )}
+      {waiting.map((t) => {
+        const open = openQuestion(t)!;
+        const stuck = dependentsTree(t.id, tasks);
+        return (
+          <div key={t.id} style={{
+            background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+            display: 'flex', flexDirection: 'column'
+          }}>
+            {/* header: title + assignee */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '6px 9px',
+              background: 'var(--cth-lilac-light, #ece2f5)', boxShadow: 'inset 0 -1px 0 var(--cth-ink-700)'
+            }}>
+              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {t.title}
+              </span>
+              {nameFor(t.assignee) && <PixelBadge status="blocked" label={nameFor(t.assignee)!} />}
+            </div>
+
+            <div style={{ padding: 9, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* the question */}
+              <div style={{ fontSize: 13, lineHeight: '19px', color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap' }}>
+                {open.q}
+              </div>
+
+              {/* answer box */}
+              <textarea
+                value={drafts[t.id] ?? ''}
+                onChange={(e) => setDrafts((d) => ({ ...d, [t.id]: e.target.value }))}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void sendAnswer(t); }}
+                rows={3}
+                placeholder="Your answer… (Ctrl+Enter to send)"
+                style={{
+                  width: '100%', boxSizing: 'border-box', padding: '6px 8px', resize: 'vertical',
+                  background: 'var(--cth-paper-100)', border: 'none',
+                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: '18px',
+                  color: 'var(--cth-ink-900)', outline: 'none'
+                }}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <PixelButton
+                  variant="primary" size="sm"
+                  disabled={!(drafts[t.id] ?? '').trim() || sending === t.id}
+                  onClick={() => void sendAnswer(t)}
+                >
+                  {sending === t.id ? 'sending…' : 'answer & unblock'}
+                </PixelButton>
+                {(t.humanQA?.filter((e) => e.a).length ?? 0) > 0 && (
+                  <span style={{ fontSize: 10, color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-display)' }}>
+                    {t.humanQA!.filter((e) => e.a).length} EARLIER ANSWER{t.humanQA!.filter((e) => e.a).length === 1 ? '' : 'S'} ON THIS CARD
+                  </span>
+                )}
+              </div>
+
+              {/* the cascade: what's stuck behind this answer */}
+              {stuck.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-coral)' }}>
+                    BLOCKING {stuck.length} DOWNSTREAM TASK{stuck.length === 1 ? '' : 'S'}
+                  </div>
+                  {stuck.slice(0, 6).map((d, i) => (
+                    <div key={d.id} style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      paddingLeft: 8 + Math.min(i, 3) * 8,
+                      fontSize: 12, color: 'var(--cth-ink-700)'
+                    }}>
+                      <span style={{ color: 'var(--cth-ink-300)' }}>└</span>
+                      <span style={{ width: 7, height: 7, flexShrink: 0, background: d.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-sky)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)' }} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
+                      {nameFor(d.assignee) && <span style={{ fontSize: 10, color: 'var(--cth-ink-500)' }}>({nameFor(d.assignee)})</span>}
+                    </div>
+                  ))}
+                  {stuck.length > 6 && (
+                    <div style={{ paddingLeft: 14, fontSize: 11, color: 'var(--cth-ink-300)' }}>… +{stuck.length - 6} more</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

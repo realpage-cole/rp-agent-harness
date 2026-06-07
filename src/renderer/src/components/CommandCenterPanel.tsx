@@ -6,6 +6,7 @@ import { SpritePortrait } from './SpritePortrait';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
+import { AskMeTab } from './AskMeTab';
 import { disposeTerminal } from './terminalPool';
 import { Icon } from './Icon';
 import { MemoryGraphPanel } from './MemoryGraphPanel';
@@ -20,7 +21,7 @@ import { buildSpawnCommand, AGENT_MODELS } from '@/store/config';
  *  per-agent model + dispatch + assistant access), a memory view, and a live
  *  activity feed / board / usage meter. */
 
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'memory' | 'graph' | 'activity' | 'handbook';
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'memory' | 'graph' | 'activity' | 'handbook';
 
 /** A recurring auto-dispatched mission (mirrors the main-process config type). */
 interface ScheduledMission {
@@ -75,6 +76,7 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
   { key: 'floor', label: 'monitor', icon: 'mcp' },
   { key: 'tasks', label: 'tasks', icon: 'check' },
+  { key: 'human', label: 'ask me', icon: 'bell' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
   { key: 'graph', label: 'graph', icon: 'web' },
   { key: 'activity', label: 'activity', icon: 'bell' },
@@ -197,6 +199,7 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
             }}
           />
         )}
+        {tab === 'human' && <AskMeTab />}
         {tab === 'memory' && (
           <MemoryTab godId={agent.id} who={selectedMemoryAgent ?? undefined} onWho={setSelectedMemoryAgent} />
         )}

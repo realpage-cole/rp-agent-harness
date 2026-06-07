@@ -541,6 +541,53 @@ export function OfficeFloor() {
       };
       drawTaskBoard([]);
 
+      // ─── The ASK ME board: tasks waiting on the HUMAN, first class ─────────
+      // Hangs on the right wall run (between the second doorway and the war
+      // room): one lilac note per open question the god parked for the human.
+      // It pulses while anything waits — clicking it opens the Command Center's
+      // ASK ME tab, where the human reads the questions, answers, and the
+      // answers flow back to the god (documented on the card itself).
+      const askG = new Graphics();
+      askG.eventMode = 'static';
+      askG.cursor = 'pointer';
+      askG.position.set(14 * tsB + 25, 10 * tsB);
+      askG.zIndex = 11 * tsB;
+      askG.on('pointertap', (ev) => {
+        ev.stopPropagation();
+        const st = useStore.getState();
+        const god = st.agents.find((a) => a.isGod);
+        if (god) st.select(god.id);
+        st.requestCommandCenterTab('human');
+      });
+      charLayer.addChild(askG);
+      let askCount = 0;
+      let askPulse = 0;
+      const drawAskBoard = (pulse: number): void => {
+        askG.clear();
+        // lilac-framed board with a big "?" identity
+        askG.rect(0, -8, 30, 22).fill(0x5b4a6b);
+        askG.rect(1, -7, 28, 3).fill(0xcdb4e8);
+        askG.rect(1, -4, 28, 17).fill(0xc9b083);
+        if (askCount === 0) {
+          // quiet: a faint "?" watermark
+          askG.rect(13, -1, 4, 2).fill({ color: 0x8a755f, alpha: 0.8 });
+          askG.rect(15, 1, 2, 4).fill({ color: 0x8a755f, alpha: 0.8 });
+          askG.rect(15, 7, 2, 2).fill({ color: 0x8a755f, alpha: 0.8 });
+        } else {
+          const n = Math.min(askCount, 8);
+          for (let i = 0; i < n; i++) {
+            const x = 3 + (i % 4) * 7;
+            const y = -2 + Math.floor(i / 4) * 6;
+            askG.rect(x, y, 5, 4).fill(0xcdb4e8);
+            askG.rect(x + 2, y, 1, 1).fill(0x4a3b52);
+          }
+          // attention pulse around the frame while questions wait
+          const a = 0.35 + 0.3 * Math.sin(pulse * 4);
+          askG.rect(-2, -10, 34, 26).stroke({ color: 0xcdb4e8, width: 2, alpha: a });
+        }
+      };
+      drawAskBoard(0);
+
       // ─── Board choreography: every ledger move is ACTED on the floor ───────
       // Michael walks over and pins fresh cards; an assigned worker walks to
       // the TODO board, takes its note and carries it home; finishing carries
@@ -645,6 +692,9 @@ export function OfficeFloor() {
             startMove(mv);
           }
         }
+        // the ASK ME board pulses for attention while questions wait
+        askPulse += dt;
+        if (askCount > 0) drawAskBoard(askPulse);
         // global watchdog: if anything has been in flight too long, hard-sync
         moveWatchdog += dt;
         if (moveWatchdog > 30 && busyActors.size > 0) {
@@ -671,13 +721,23 @@ export function OfficeFloor() {
       let firstPoll = true;
       const pollTaskBoard = async (): Promise<void> => {
         try {
-          const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string }> } | null;
+          const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string; humanQA?: Array<{ q?: string; a?: string }> }> } | null;
           const arr = (raw && Array.isArray(raw.tasks)) ? raw.tasks : [];
           const ledger: LedgerTask[] = arr.map((t, i) => ({
             id: typeof t?.id === 'string' && t.id ? t.id : `idx-${i}`,
             status: String(t?.status ?? 'todo'),
             assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
           }));
+          // tasks waiting on the HUMAN feed the ASK ME board's note count
+          const newAsk = arr.filter((t) =>
+            String(t?.status) === 'blocked'
+            && Array.isArray(t?.humanQA)
+            && t!.humanQA!.some((e) => e && typeof e.q === 'string' && !e.a)
+          ).length;
+          if (newAsk !== askCount) {
+            askCount = newAsk;
+            drawAskBoard(askPulse);
+          }
           if (firstPoll) {
             // cold start: no theatre, just show the truth
             firstPoll = false;

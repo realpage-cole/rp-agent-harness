@@ -9,6 +9,13 @@ import { useStore } from '@/store/store';
  *  re-declared locally so the renderer doesn't reach into the preload package
  *  (same convention as store/config.ts). Structurally compatible with
  *  window.cth.hiveWriteTasks. */
+export interface HumanQA {
+  q: string;
+  a?: string;
+  askedAt?: string;
+  answeredAt?: string;
+}
+
 export interface HiveTask {
   id: string;
   title: string;
@@ -18,6 +25,24 @@ export interface HiveTask {
   dependsOn: string[];
   priority: number;
   createdAt: string;
+  /** First-class human feedback: the god appends {q} when a card needs the
+   *  human; the ASK ME view fills in {a}. Full history stays on the card. */
+  humanQA?: HumanQA[];
+}
+
+/** The card's currently open question for the human, if any. */
+export function openQuestion(t: HiveTask): HumanQA | undefined {
+  if (!Array.isArray(t.humanQA)) return undefined;
+  for (let i = t.humanQA.length - 1; i >= 0; i--) {
+    const e = t.humanQA[i];
+    if (e && typeof e.q === 'string' && !e.a) return e;
+  }
+  return undefined;
+}
+
+/** Waiting on the human = blocked with an unanswered question on the card. */
+export function waitsOnHuman(t: HiveTask): boolean {
+  return t.status === 'blocked' && !!openQuestion(t);
 }
 
 type Status = HiveTask['status'];
@@ -63,7 +88,17 @@ function parseTasks(raw: unknown): HiveTask[] {
         ? (t.status as Status) : 'todo',
       dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d): d is string => typeof d === 'string') : [],
       priority: typeof t.priority === 'number' ? t.priority : 3,
-      createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString()
+      createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
+      humanQA: Array.isArray(t.humanQA)
+        ? (t.humanQA as unknown[])
+          .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object' && typeof (e as { q?: unknown }).q === 'string')
+          .map((e) => ({
+            q: e.q as string,
+            a: typeof e.a === 'string' ? e.a : undefined,
+            askedAt: typeof e.askedAt === 'string' ? e.askedAt : undefined,
+            answeredAt: typeof e.answeredAt === 'string' ? e.answeredAt : undefined
+          }))
+        : undefined
     }));
 }
 
@@ -244,6 +279,14 @@ function TaskCard({ task, accent, assigneeName, onOpen }: {
           </span>
         )}
       </span>
+      {waitsOnHuman(task) && (
+        <span title="waiting on YOUR answer — see the ASK ME tab" style={{
+          alignSelf: 'center', marginRight: 6, flexShrink: 0,
+          fontFamily: 'var(--cth-font-display)', fontSize: 10, padding: '2px 5px 1px',
+          background: 'var(--cth-lilac)', color: 'var(--cth-ink-900)',
+          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+        }}>?</span>
+      )}
     </button>
   );
 }
@@ -310,6 +353,41 @@ function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose }: {
             }}>
               {task.description?.trim() || <span style={{ color: 'var(--cth-ink-300)' }}>(no description on this card)</span>}
             </div>
+
+            {/* The human Q&A trail — every decision documented on the card */}
+            {(task.humanQA?.length ?? 0) > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-500)' }}>
+                  HUMAN Q&A
+                </div>
+                {task.humanQA!.map((e, i) => (
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <div style={{
+                      padding: '5px 7px', background: 'var(--cth-lilac-light, #ece2f5)',
+                      boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                      fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap'
+                    }}>
+                      <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, marginRight: 6 }}>Q</span>
+                      {e.q}
+                    </div>
+                    {e.a ? (
+                      <div style={{
+                        padding: '5px 7px', background: 'var(--cth-mint-light, #d9eed9)',
+                        boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                        fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap'
+                      }}>
+                        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, marginRight: 6 }}>A</span>
+                        {e.a}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: 'var(--cth-coral)', fontFamily: 'var(--cth-font-display)' }}>
+                        AWAITING YOUR ANSWER — ASK ME TAB
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Dependencies, resolved to titles */}
             {deps.length > 0 && (
