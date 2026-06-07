@@ -87,7 +87,15 @@ interface Runtime {
   cupCarryHome?: boolean;
   err?: ErrandRun;
   run?: CoffeeRun;
+  /** When the current busy stretch (working/thinking/compacting) began. */
+  busySince?: number;
 }
+
+/** Only a busy stretch at least this long earns a cheer on finishing. Short
+ *  turns (an inbox nudge, a heartbeat reply) end quietly — otherwise idle
+ *  agents "celebrate" every few minutes over nothing, and the "done!" bubble
+ *  reads like real work completed when none did. */
+const CHEER_MIN_BUSY_MS = 60_000;
 
 /** What an avatar mutters per errand, picked at random. */
 const ERRAND_THOUGHTS: Record<ErrandKind, readonly string[]> = {
@@ -910,10 +918,17 @@ export function OfficeFloor() {
           || rt.prevPrompt !== agent.lastPrompt;
         if (!changed) return;
         // Finishing real work (working/thinking/compacting → done) earns a
-        // little celebration before the avatar goes back to roaming.
+        // little celebration before the avatar goes back to roaming — but only
+        // after a SUBSTANTIAL busy stretch (see CHEER_MIN_BUSY_MS): an inbox
+        // nudge or heartbeat reply that flips busy for a few seconds ends
+        // quietly instead of "celebrating" every few minutes over nothing.
+        const wasBusy = rt.prevStatus === 'working' || rt.prevStatus === 'thinking' || rt.prevStatus === 'compacting';
+        const isBusy = agent.status === 'working' || agent.status === 'thinking' || agent.status === 'compacting';
+        if (isBusy && !wasBusy) rt.busySince = Date.now();
         const finishedWork = !force && !agent.isGod
-          && (rt.prevStatus === 'working' || rt.prevStatus === 'thinking' || rt.prevStatus === 'compacting')
-          && (agent.status === 'idle' || agent.status === 'success');
+          && wasBusy && (agent.status === 'idle' || agent.status === 'success')
+          && rt.busySince !== undefined && Date.now() - rt.busySince >= CHEER_MIN_BUSY_MS;
+        if (!isBusy) rt.busySince = undefined;
         rt.prevStatus = agent.status;
         rt.prevAction = agent.action;
         rt.prevCarrying = agent.carrying;
