@@ -14,6 +14,7 @@ gauge on every agent card, sharper terminals, correct Windows metering, and disp
 always routes through the god:
 
 - **Live context-window gauge on each agent card** — a Claude Code statusLine pushes the session's exact tokens and real window size after every response, so each card shows a precise live gauge (drawn from Claude Code itself, not a transcript estimate), and it zeroes the instant you send `/clear`. (#12)
+- **Dedicated context-window row on the monitor tab** — the cumulative budget bar was being misread as a context gauge, so a separate `ctx` row now shows the real context window alongside it. (#46)
 - **Per-session terminal theme toggle + Unicode 11 emoji widths** — switch a terminal's Claude theme independently, and wide emoji stop nudging the cursor out of alignment. (#26)
 - **All human dispatch flows through the god** — every Command Center dispatch mails the god instead of a worker's inbox; the worker picker becomes a *suggested owner*, so nothing skips the orchestrator. (#45)
 - **Windows usage meter no longer reads 0/0** — the transcript directory is now encoded the way Claude Code encodes it on Windows (every non-alphanumeric char, drive colon included), so tokens and cost read correctly. (#34)
