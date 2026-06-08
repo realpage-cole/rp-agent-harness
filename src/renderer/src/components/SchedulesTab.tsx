@@ -4,8 +4,7 @@ import { useStore } from '@/store/store';
 
 /**
  * SCHEDULES — recurring auto-dispatched missions, as their own Command-Center
- * tab (they used to be buried in the monitor tab's long scroll). Also the
- * landing spot for the calendar hanging in the boss's office.
+ * tab (they used to be buried in the monitor tab's long scroll).
  */
 
 interface ScheduledMission {
@@ -92,7 +91,7 @@ export function SchedulesTab() {
     setMLabel(''); setMBody('');
   };
   const targetName = (to: string) =>
-    to === 'broadcast' ? 'everyone' : to === 'god' ? 'Michael' : agents.find((a) => a.id === to)?.name ?? to;
+    to === 'broadcast' ? 'everyone' : to === 'god' ? 'Orchestrator' : agents.find((a) => a.id === to)?.name ?? to;
   const intervalLabel = (ms: number) => INTERVAL_OPTS.find((o) => o.ms === ms)?.label ?? `${Math.round(ms / 3600000)}h`;
 
   return (
@@ -160,7 +159,7 @@ export function SchedulesTab() {
         </select>
         <select value={mTo} onChange={(e) => setMTo(e.target.value)} style={selectStyle}>
           <option value="broadcast">everyone</option>
-          <option value="god">Michael</option>
+          <option value="god">Orchestrator</option>
           {agents.filter((a) => !a.isGod).map((a) => (
             <option key={a.id} value={a.id}>{a.name}</option>
           ))}

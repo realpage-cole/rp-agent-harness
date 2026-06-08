@@ -12,7 +12,7 @@
  * Human-in-the-loop is native to each agent's Claude Code session: permission
  * prompts surface in the agent's own terminal (and can be approved remotely via
  * `/remote-control`). The hive keeps no separate approval queue — a message aimed
- * at "human" is routed to the god/orchestrator, the human's proxy on the floor.
+ * at "human" is routed to the god/orchestrator, the human's proxy on the team.
  *   - single-committer git with retry/backoff + stale-lock recovery
  *
  * Everything here runs in the Electron main process.
@@ -34,6 +34,10 @@ import {
   providerPreset,
   type AgentProvider
 } from '../shared/agentProvider';
+// Type-only import (no runtime edge) — keeps the DECOUPLING CONTRACT: hive.ts
+// owns the shape↔file mapping behind a HiveBridge; sync/state.ts never imports
+// hive.ts. The StateRows interface is the wire shape readStateRows() returns.
+import type { StateRows } from './sync/types';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -88,6 +92,14 @@ export interface HiveTask {
    *  once and never persisted), so a GET status lookup can match by hashing the
    *  presented token. Read-only capability: it never widens routing or exposure. */
   webhook?: { tokenHash: string };
+  /** Per-card last-write stamp (ms epoch), used as the LAST-WRITER-WINS key when
+   *  syncing the task ledger across machines (Phase 3). ADDITIVE: stamped in
+   *  `writeTasks` on local writes and carried in/out of the synced payload; old
+   *  cards without it default to 0 (always loses to a stamped remote). */
+  updatedAt?: number;
+  /** Who last touched this card (agent id / 'human' / 'system'), carried across
+   *  sync for provenance. Cosmetic; never affects routing. ADDITIVE/optional. */
+  updatedBy?: string;
 }
 
 export interface AgentMeta {
@@ -99,8 +111,9 @@ export interface AgentMeta {
   capabilities?: string[];
   cwd: string;
   isGod?: boolean;
-  /** Michael's prep assistant — enriches prompts and forwards them to Michael.
-   *  Send-only: excluded from broadcast fan-out so it never drains an inbox. */
+  /** The orchestrator's prep assistant — enriches prompts and forwards them to
+   *  the orchestrator. Send-only: excluded from broadcast fan-out so it never
+   *  drains an inbox. */
   isAssistant?: boolean;
 }
 
@@ -121,6 +134,22 @@ export interface RegistryAgent extends AgentMeta {
 export interface Registry {
   godId: string | null;
   agents: Record<string, RegistryAgent>;
+  /** ADDITIVE hive-level metadata (Phase 3 shared-state sync). Old installs
+   *  without it default to {} — every reader tolerates its absence. */
+  meta?: RegistryMeta;
+}
+
+/** Hive-level sync bookkeeping carried in registry.json. ADDITIVE: an old
+ *  registry.json has no `meta` block and is read with all-zero/empty defaults. */
+export interface RegistryMeta {
+  /** Last-write stamp (ms epoch) of board.md, the LAST-WRITER-WINS key for the
+   *  blackboard. The harness has no board writer (god agents edit board.md on
+   *  disk directly), so `readStateRows` detects content changes by hash and
+   *  bumps this; defaults to 0 when never stamped. */
+  boardUpdatedAt?: number;
+  /** sha1 of the board.md body at the time `boardUpdatedAt` was last set, so a
+   *  content change can be detected without a write hook. */
+  boardHash?: string;
 }
 
 /** Build env + extra spawn args that make an agent process hive-aware. */
@@ -169,8 +198,8 @@ export class HiveManager {
   /**
    * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
    * @param emit     Optional sink for renderer-facing events (set by the main
-   *                 process to `webContents.send`). Used to animate routed
-   *                 messages on the office floor; a no-op in tests/headless.
+   *                 process to `webContents.send`). Used to surface routed
+   *                 messages in the dashboard; a no-op in tests/headless.
    */
   constructor(
     private getHome: () => string | null,
@@ -248,7 +277,7 @@ export class HiveManager {
     const log = join(root, 'log.jsonl');
     if (!existsSync(log)) writeFileSync(log, '', 'utf8');
 
-    // The Claude Code command reference Michael consults (refreshed each bootstrap
+    // The Claude Code command reference the orchestrator consults (refreshed each bootstrap
     // so it tracks the bundled list).
     writeFileSync(join(root, 'COMMANDS.md'), COMMANDS_MD, 'utf8');
 
@@ -467,7 +496,7 @@ export class HiveManager {
         Notification: [entry()],
         SessionStart: [entry()],
         // #5C: surface mid-`/compact` so an agent boxing up its context reads as
-        // 'compacting' on the floor instead of looking frozen.
+        // 'compacting' in the dashboard instead of looking frozen.
         PreCompact: [entry()],
         PostCompact: [entry()]
       }
@@ -512,7 +541,7 @@ export class HiveManager {
       `- Role: ${meta.role ?? (meta.isGod ? 'orchestrator (god)' : 'agent')}`,
       `- Capabilities: ${caps}`,
       `- Working directory: ${meta.cwd}`,
-      meta.isGod ? '- You are the **god / orchestrator**. You run the floor — keep awareness of the whole team, delegate execution, and personally own only the important calls (decomposition, sign-offs, conflicts, integration), not the grunt work.' : '',
+      meta.isGod ? '- You are the **god / orchestrator**. You run the team — keep awareness of the whole team, delegate execution, and personally own only the important calls (decomposition, sign-offs, conflicts, integration), not the grunt work.' : '',
       meta.isGod ? '- Monitor the team with `fleet.json` (live per-agent status/tokens/cost/breaker) and `registry.json`; full command reference in `COMMANDS.md`. `claude agents` does NOT list your hive siblings.' : '',
       ''
     ].filter(Boolean).join('\n');
@@ -535,11 +564,11 @@ export class HiveManager {
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
-        + ` MONITOR the floor by reading ${root}/fleet.json (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${root}/registry.json — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${root}/COMMANDS.md (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as an inbox message to you — read it, act on it, and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+        + ` MONITOR the team by reading ${root}/fleet.json (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${root}/registry.json — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${root}/COMMANDS.md (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the dashboard's Needs-you queue; the human's answer lands in the same entry ("a") AND arrives as an inbox message to you — read it, act on it, and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
       : meta.isAssistant
-      ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
+      ? 'You are the orchestrator\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in the orchestrator\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that the orchestrator can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to the orchestrator.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
-    const guardrailsLine = 'Guardrails: a circuit breaker watches the floor — a "Circuit breaker: steer/constrain" message means you are looping or overspending, so STOP repeating, summarize what you tried, and follow it. Be token-frugal (a floor-wide or per-agent token budget can pause you). The shared plan has two parts: board.md (freeform; god is the sole scribe) and tasks.json (structured kanban — todo/doing/blocked/done).';
+    const guardrailsLine = 'Guardrails: a circuit breaker watches the team — a "Circuit breaker: steer/constrain" message means you are looping or overspending, so STOP repeating, summarize what you tried, and follow it. Be token-frugal (a team-wide or per-agent token budget can pause you). The shared plan has two parts: board.md (freeform; god is the sole scribe) and tasks.json (structured kanban — todo/doing/blocked/done).';
     return [
       `You are "${meta.name}" (${meta.id}), an autonomous agent in a collaborating hive of Claude agents.`,
       `Your private workspace is ${dir}. The shared hive is ${root}. Full protocol: ${root}/PROTOCOL.md.`,
@@ -667,7 +696,8 @@ export class HiveManager {
   }
 
   /** Tell the renderer a message was routed, with its resolved recipients, so
-   *  the floor can fly an envelope from the sender to each one. Best-effort. */
+   *  the dashboard can reflect the handoff from the sender to each one.
+   *  Best-effort. */
   private emitMessage(msg: HiveMessage, targets: string[]): void {
     this.emit?.('hive:message', {
       id: msg.id,
@@ -676,8 +706,8 @@ export class HiveManager {
       act: msg.act,
       subject: msg.subject,
       targets,
-      // Coral-tints the floor envelope for a message the agent flagged for the
-      // human (now routed to the god proxy). Cosmetic only — no queue behind it.
+      // Flags a message the agent routed to the human (now handled by the god
+      // proxy) so the dashboard can highlight it. Cosmetic only — no queue behind it.
       needsHuman: msg.to === 'human'
     });
   }
@@ -766,15 +796,296 @@ export class HiveManager {
   }
 
   /** Persist the task ledger to hive/tasks.json and commit it. Mirrors the
-   *  board/message persist pattern: write JSON, log the change, single-commit. */
+   *  board/message persist pattern: write JSON, log the change, single-commit.
+   *
+   *  Stamps each card's `updatedAt` (ms epoch) for Phase 3 LAST-WRITER-WINS sync:
+   *  ADDITIVE and minimal — a card is (re)stamped ONLY when its content actually
+   *  changed vs the prior on-disk version (or it had no stamp at all), so a write
+   *  that touches one card doesn't bump every card's stamp and lose remote edits.
+   *  Old cards without a stamp default to 0 (always lose to a stamped remote). */
   writeTasks(tasks: HiveTask[]): void {
     const root = this.root();
     if (!root) return;
     this.ensureHive();
-    this.writeJson(join(root, 'tasks.json'), { tasks });
+    this.writeJson(join(root, 'tasks.json'), { tasks: this.stampTasks(tasks) });
     this.appendLog({ kind: 'tasks', count: tasks.length });
     this.commit(`hive: tasks (${tasks.length})`);
   }
+
+  /** Content fingerprint of a task EXCLUDING its sync stamps, so re-stamping is
+   *  driven purely by real edits (not by the stamp itself changing). */
+  private taskContentHash(t: HiveTask): string {
+    const { updatedAt: _u, updatedBy: _b, ...content } = t;
+    void _u; void _b;
+    return createHash('sha1').update(JSON.stringify(content)).digest('hex');
+  }
+
+  /** Stamp `updatedAt` on cards whose content changed vs the current on-disk
+   *  ledger (or that carry no stamp yet); leave unchanged cards' stamps intact.
+   *  Pure (returns a new array) — never mutates the caller's objects. */
+  private stampTasks(next: HiveTask[]): HiveTask[] {
+    const now = Date.now();
+    const prev = (this.tasks() as { tasks?: HiveTask[] }).tasks ?? [];
+    const prevById = new Map<string, HiveTask>();
+    for (const t of prev) if (t && typeof t.id === 'string') prevById.set(t.id, t);
+    return next.map((t) => {
+      const before = prevById.get(t.id);
+      const unchanged =
+        before &&
+        typeof t.updatedAt === 'number' &&
+        this.taskContentHash(before) === this.taskContentHash(t);
+      if (unchanged) return t; // real content identical → keep its existing stamp
+      return { ...t, updatedAt: now };
+    });
+  }
+  // — Phase 3 shared-state sync (HiveBridge implementation) —
+  //
+  // The DECOUPLING CONTRACT: sync/state.ts is PURE TRANSPORT and never imports
+  // hive.ts. All hive<->DB shape mapping + the LAST-WRITER-WINS / ADDITIVE merge
+  // live here, behind the two methods index.ts wires into the SyncManager as a
+  // `HiveBridge`. readStateRows() returns DOMAIN fields only (snake_case, DB-
+  // column-ready); state.ts stamps workspace_id/machine_id before upserting.
+
+  /**
+   * Shape the hive's shared state — roster (registry.json), kanban (tasks.json),
+   * and blackboard (board.md) — into DB-column-ready domain rows for the push.
+   *
+   * Each row carries an `updated_at` (ms epoch) — the LAST-WRITER-WINS key:
+   *  - agents: `last_seen` doubles as `updated_at` (the only per-agent write stamp
+   *    we have); a never-seen agent defaults to 0.
+   *  - tasks:  the per-card `updatedAt` stamped by `writeTasks` (default 0 for old
+   *    cards); the whole card rides along as the jsonb `payload`.
+   *  - board:  a content-derived stamp tracked in registry `meta` — the harness has
+   *    no board writer (god agents edit board.md directly), so we detect a body
+   *    change by hash and bump `meta.boardUpdatedAt`, persisting it so subsequent
+   *    pushes are stable until the body changes again. Defaults to 0.
+   *
+   * Read-only w.r.t. the on-disk shapes EXCEPT the board-stamp bookkeeping, which
+   * is ADDITIVE (only touches registry `meta`). Best-effort; never throws.
+   */
+  readStateRows(): StateRows {
+    const empty: StateRows = { agents: [], tasks: [], board: null };
+    const root = this.root();
+    if (!root) return empty;
+    try {
+      const reg = this.registry();
+      const agents: Record<string, unknown>[] = Object.entries(reg.agents ?? {}).map(
+        ([id, a]) => ({
+          agent_id: id,
+          name: a.name ?? id,
+          role: a.role ?? null,
+          status: a.status ?? null,
+          cwd: a.cwd ?? null,
+          is_god: reg.godId === id || !!a.isGod,
+          archived: !!a.archived,
+          last_seen: typeof a.lastSeen === 'number' ? a.lastSeen : 0,
+          // last_seen IS the per-agent write stamp — reuse it as the LWW key.
+          updated_at: typeof a.lastSeen === 'number' ? a.lastSeen : 0
+        })
+      );
+
+      const taskList = (this.tasks() as { tasks?: HiveTask[] }).tasks ?? [];
+      const tasks: Record<string, unknown>[] = taskList
+        .filter((t): t is HiveTask => !!t && typeof t.id === 'string')
+        .map((t) => ({
+          task_id: t.id,
+          payload: t, // whole card as jsonb
+          status: t.status ?? null,
+          assignee: t.assignee ?? null,
+          updated_by: t.updatedBy ?? null,
+          updated_at: typeof t.updatedAt === 'number' ? t.updatedAt : 0
+        }));
+
+      const board = this.boardStateRow(root, reg);
+
+      return { agents, tasks, board };
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * Compute the board's { body, updated_at } row, tracking its write stamp in
+   * registry `meta` by content hash. ADDITIVE: only ever touches `meta`. On the
+   * first read of an existing board it stamps `now` once (so it can sync), then
+   * keeps that stamp until the body changes. Returns null when there's no board.
+   */
+  private boardStateRow(root: string, reg: Registry): { body: string; updated_at: number } | null {
+    const path = join(root, 'board.md');
+    if (!existsSync(path)) return null;
+    let body: string;
+    try { body = readFileSync(path, 'utf8'); } catch { return null; }
+    const hash = createHash('sha1').update(body).digest('hex');
+    const meta = reg.meta ?? {};
+    let stamp = typeof meta.boardUpdatedAt === 'number' ? meta.boardUpdatedAt : 0;
+    if (meta.boardHash !== hash) {
+      // Body changed since last stamp (or never stamped) — bump + persist so the
+      // stamp is stable across pushes until the next real edit. Best-effort.
+      stamp = Date.now();
+      try {
+        reg.meta = { ...meta, boardUpdatedAt: stamp, boardHash: hash };
+        this.writeJson(join(root, 'registry.json'), reg);
+        this.commit('hive: board sync stamp');
+      } catch { /* best-effort — stamp still returned for this pass */ }
+    }
+    return { body, updated_at: stamp };
+  }
+
+  /**
+   * Merge remote shared-state rows into the local hive — LAST-WRITER-WINS by
+   * `updated_at` and ADDITIVE (never deletes a local row missing from remote).
+   *
+   *  - agents/tasks: for each remote row, upsert into the local map ONLY when there
+   *    is no local row with that id OR `remote.updated_at` is STRICTLY newer than
+   *    the local row's stamp. Local-only rows are preserved untouched. `godId` and
+   *    any local-only registry/card fields survive.
+   *  - board: overwrite board.md ONLY when `remote.updated_at` is strictly newer
+   *    than the local board stamp; the new stamp/hash is recorded in registry meta.
+   *
+   * After each CHANGED file: atomicWriteJson then commit() (the single-committer
+   * path). Best-effort throughout — never throws into the sync timer.
+   */
+  applyStateRows(remote: {
+    agents?: Record<string, unknown>[];
+    tasks?: Record<string, unknown>[];
+    board?: { body: string; updated_at: number } | null;
+  }): void {
+    const root = this.root();
+    if (!root) return;
+    try { this.ensureHive(); } catch { return; }
+
+    try {
+      if (remote.agents && remote.agents.length) this.mergeAgents(root, remote.agents);
+    } catch { /* best-effort per file */ }
+    try {
+      if (remote.tasks && remote.tasks.length) this.mergeTasks(root, remote.tasks);
+    } catch { /* best-effort per file */ }
+    try {
+      if (remote.board) this.mergeBoard(root, remote.board);
+    } catch { /* best-effort per file */ }
+  }
+
+  /** LWW + ADDITIVE merge of remote agent rows into registry.json. Preserves
+   *  godId and any local-only agents; only writes/commits when something changed. */
+  private mergeAgents(root: string, rows: Record<string, unknown>[]): void {
+    const reg = this.registry();
+    let changed = false;
+    for (const row of rows) {
+      const id = typeof row.agent_id === 'string' ? row.agent_id : null;
+      if (!id) continue;
+      const remoteAt =
+        typeof row.updated_at === 'number'
+          ? row.updated_at
+          : typeof row.last_seen === 'number'
+          ? row.last_seen
+          : 0;
+      const local = reg.agents[id];
+      const localAt = local && typeof local.lastSeen === 'number' ? local.lastSeen : 0;
+      // ADDITIVE + LWW: accept only a brand-new id or a STRICTLY newer remote.
+      if (local && remoteAt <= localAt) continue;
+
+      const lastSeen =
+        typeof row.last_seen === 'number' ? row.last_seen : remoteAt || (local?.lastSeen ?? 0);
+      const merged: RegistryAgent = {
+        // Preserve local-only fields (provider, capabilities, sessionId, …) when
+        // present; remote scalars win since remote is strictly newer here.
+        ...(local ?? ({} as RegistryAgent)),
+        id,
+        name: typeof row.name === 'string' ? row.name : local?.name ?? id,
+        role: typeof row.role === 'string' ? row.role : local?.role,
+        status: (this.coerceStatus(row.status) ?? local?.status ?? 'idle'),
+        cwd: typeof row.cwd === 'string' ? row.cwd : local?.cwd ?? '',
+        isGod: typeof row.is_god === 'boolean' ? row.is_god : local?.isGod,
+        archived: typeof row.archived === 'boolean' ? row.archived : local?.archived,
+        lastSeen
+      };
+      reg.agents[id] = merged;
+      // Keep godId coherent if a remote agent claims the role; never clear it.
+      if (merged.isGod) reg.godId = id;
+      changed = true;
+    }
+    if (!changed) return;
+    this.atomicWriteJson(join(root, 'registry.json'), reg);
+    this.appendLog({ kind: 'sync-agents', count: rows.length });
+    this.commit('hive: sync agents (remote)');
+  }
+
+  /** Map a possibly-unknown remote status onto the RegistryAgent union; returns
+   *  undefined for anything unrecognized so the caller can fall back to local. */
+  private coerceStatus(v: unknown): RegistryAgent['status'] | undefined {
+    return v === 'idle' || v === 'working' || v === 'blocked' || v === 'gone' ? v : undefined;
+  }
+
+  /** LWW + ADDITIVE merge of remote task rows into tasks.json. The whole card
+   *  rides in `payload`; we trust its `updatedAt` (falling back to the row's
+   *  `updated_at`). Local-only cards are preserved. Writes/commits only on change.
+   *
+   *  NOTE: writes via atomicWriteJson directly (NOT writeTasks) so the remote
+   *  stamps are preserved verbatim — re-stamping here would corrupt LWW. */
+  private mergeTasks(root: string, rows: Record<string, unknown>[]): void {
+    const local = (this.tasks() as { tasks?: HiveTask[] }).tasks ?? [];
+    const byId = new Map<string, HiveTask>();
+    for (const t of local) if (t && typeof t.id === 'string') byId.set(t.id, t);
+
+    let changed = false;
+    for (const row of rows) {
+      const id =
+        typeof row.task_id === 'string'
+          ? row.task_id
+          : row.payload && typeof (row.payload as HiveTask).id === 'string'
+          ? (row.payload as HiveTask).id
+          : null;
+      if (!id) continue;
+      const card =
+        row.payload && typeof row.payload === 'object'
+          ? ({ ...(row.payload as HiveTask) } as HiveTask)
+          : null;
+      if (!card) continue;
+      card.id = id; // the row id is authoritative
+
+      const remoteAt =
+        typeof card.updatedAt === 'number'
+          ? card.updatedAt
+          : typeof row.updated_at === 'number'
+          ? row.updated_at
+          : 0;
+      card.updatedAt = remoteAt; // carry the stamp so future LWW compares hold
+
+      const existing = byId.get(id);
+      const localAt = existing && typeof existing.updatedAt === 'number' ? existing.updatedAt : 0;
+      if (existing && remoteAt <= localAt) continue; // local same-or-newer → keep
+
+      byId.set(id, card);
+      changed = true;
+    }
+    if (!changed) return;
+    this.atomicWriteJson(join(root, 'tasks.json'), { tasks: [...byId.values()] });
+    this.appendLog({ kind: 'sync-tasks', count: rows.length });
+    this.commit('hive: sync tasks (remote)');
+  }
+
+  /** LWW overwrite of board.md — only when the remote stamp is strictly newer
+   *  than the local board stamp. Records the new stamp/hash in registry meta. */
+  private mergeBoard(root: string, remote: { body: string; updated_at: number }): void {
+    if (typeof remote.body !== 'string' || typeof remote.updated_at !== 'number') return;
+    const reg = this.registry();
+    const localAt = typeof reg.meta?.boardUpdatedAt === 'number' ? reg.meta.boardUpdatedAt : 0;
+    if (remote.updated_at <= localAt) return; // local same-or-newer → keep
+
+    const path = join(root, 'board.md');
+    // atomicWriteJson is JSON-only; board.md is raw markdown — write atomically
+    // via the same tmp+rename discipline so a reader never sees a torn file.
+    const tmp = `${path}.tmp-${shortRand()}`;
+    writeFileSync(tmp, remote.body, 'utf8');
+    renameSync(tmp, path);
+
+    const hash = createHash('sha1').update(remote.body).digest('hex');
+    reg.meta = { ...(reg.meta ?? {}), boardUpdatedAt: remote.updated_at, boardHash: hash };
+    this.atomicWriteJson(join(root, 'registry.json'), reg);
+    this.appendLog({ kind: 'sync-board', updatedAt: remote.updated_at });
+    this.commit('hive: sync board (remote)');
+  }
+
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');
     return existsSync(p) ? readFileSync(p, 'utf8') : '';
@@ -834,7 +1145,7 @@ export class HiveManager {
     }
   }
 
-  /** Write the live fleet snapshot Michael reads (`fleet.json`, gitignored).
+  /** Write the live fleet snapshot the orchestrator reads (`fleet.json`, gitignored).
    *  Best-effort — called from a timer, must never throw. */
   writeFleetSnapshot(snapshot: unknown): void {
     const root = this.root();
@@ -1014,7 +1325,7 @@ The harness fills in \`id\`, \`from\`, \`hops\`, and timestamps.
   Code: a tool you run that needs permission prompts in your own session (the human
   can approve it remotely from their phone via \`/remote-control\`). If you genuinely
   need a human decision, raise it with \`god\` (a message \`"to": "human"\` is routed to
-  the god/orchestrator, the human's proxy on the floor).
+  the god/orchestrator, the human's proxy on the team).
 - \`board.md\` is the shared plan. Don't edit it directly — \`propose\` changes to \`god\`,
   who is its sole scribe.
 - Re-reading a message you already moved to \`.done/\` is a no-op. Don't reprocess.
@@ -1030,7 +1341,7 @@ A circuit breaker watches every agent for runaway behavior (looping on the same 
 overspending). It escalates gently: \`steer\` → \`constrain\` → \`stop\`. If a \`Circuit breaker: steer\`
 or \`Circuit breaker: constrain\` message lands in your inbox, you ARE the problem it caught — stop
 repeating, summarize what you've tried, and do exactly what the message says (constrain = go read-only
-and get god's sign-off before more tool calls). Be **token-frugal**: the floor has a token budget and
+and get god's sign-off before more tool calls). Be **token-frugal**: the team has a token budget and
 each agent can have its own token limit; crossing it trips the breaker. Prefer references over pasted
 content, and \`/compact\` your own session when context gets heavy.
 

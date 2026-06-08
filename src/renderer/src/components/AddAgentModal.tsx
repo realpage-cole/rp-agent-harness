@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
-import { SpritePortrait } from './SpritePortrait';
+import { Avatar } from './Avatar';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
-import { OFFICE_CAST, DEFAULT_CHARACTER, type OfficeCharacterName } from '@/scene/office/cast';
 import { type AccentColorName } from '@/design/tokens';
 import {
   type AgentProvider,
@@ -41,8 +40,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const initialProvider = inferAgentProvider(config.defaultCommand);
   const initialModel = isClaudeProvider(initialProvider) ? config.defaultModel : undefined;
 
-  const [name, setName] = useState('Jim');
-  const [character, setCharacter] = useState<OfficeCharacterName>(DEFAULT_CHARACTER);
+  const [name, setName] = useState('Worker');
   const [accent, setAccent] = useState<AccentColorName>('sky');
   const [cwd, setCwd] = useState<string>(config.registeredRepos[0] ?? '');
   const [provider, setProvider] = useState<AgentProvider>(initialProvider);
@@ -124,7 +122,6 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     const agent: Agent = {
       id,
       name: name.trim(),
-      character,
       accent,
       description: description.trim() || 'a fresh harness',
       project: basename(cwd),
@@ -321,51 +318,27 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               </span>
             </label>
 
-            <Row label="Character">
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {OFFICE_CAST.map(c => (
-                  <button
-                    key={c.name}
-                    onClick={() => { setCharacter(c.name); setName(c.displayName); }}
-                    title={c.blurb}
-                    style={{
-                      padding: 4,
-                      background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
-                      boxShadow: character === c.name
-                        ? 'inset 0 0 0 2px var(--cth-ink-900)'
-                        : 'inset 0 0 0 1px var(--cth-ink-700)',
-                      cursor: 'pointer',
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-                      border: 'none', width: 56
-                    }}
-                  >
-                    <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
-                      <SpritePortrait character={c.name} scale={2} />
-                    </div>
-                    <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
-                  </button>
-                ))}
-              </div>
-            </Row>
-
             <Row label="Color">
-              <div style={{ display: 'flex', gap: 6 }}>
-                {ACCENTS.map(a => (
-                  <button
-                    key={a}
-                    onClick={() => setAccent(a)}
-                    style={{
-                      width: 32, height: 32,
-                      background: `var(--cth-${a})`,
-                      boxShadow: accent === a
-                        ? 'inset 0 0 0 2px var(--cth-ink-900), 0 0 0 2px var(--cth-ink-900)'
-                        : 'inset 0 0 0 1px var(--cth-ink-900)',
-                      cursor: 'pointer',
-                      border: 'none'
-                    }}
-                    aria-label={a}
-                  />
-                ))}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <Avatar name={name || 'Worker'} accent={accent} size={40} />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {ACCENTS.map(a => (
+                    <button
+                      key={a}
+                      onClick={() => setAccent(a)}
+                      style={{
+                        width: 32, height: 32,
+                        background: `var(--cth-${a})`,
+                        boxShadow: accent === a
+                          ? 'inset 0 0 0 2px var(--cth-ink-900), 0 0 0 2px var(--cth-ink-900)'
+                          : 'inset 0 0 0 1px var(--cth-ink-900)',
+                        cursor: 'pointer',
+                        border: 'none'
+                      }}
+                      aria-label={a}
+                    />
+                  ))}
+                </div>
               </div>
             </Row>
 

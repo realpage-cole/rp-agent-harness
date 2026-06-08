@@ -41,7 +41,7 @@ export const CODEX_COMMAND_GROUPS: CmdGroup[] = [
   {
     title: 'APPROVALS & PERMISSIONS',
     items: [
-      { cmd: 'codex -a never -s workspace-write', kind: 'cli', desc: 'Auto mode: never prompt for approval (-a never) and scope the sandbox to the workspace (-s workspace-write). Used by Munder Difflin when auto mode is on.' },
+      { cmd: 'codex -a never -s workspace-write', kind: 'cli', desc: 'Auto mode: never prompt for approval (-a never) and scope the sandbox to the workspace (-s workspace-write). Used by Hive when auto mode is on.' },
       { cmd: 'codex --dangerously-bypass-approvals-and-sandbox', kind: 'cli', desc: 'Skip all approval prompts AND disable the OS sandbox entirely. CI-only full-bypass override — for externally-isolated environments (Docker, CI VM) only.' },
       { cmd: 'codex -a untrusted', kind: 'cli', desc: 'Only run trusted commands without asking; escalate to the user for anything else.' },
       { cmd: 'codex -s danger-full-access', kind: 'cli', desc: 'Remove all sandbox restrictions (fine-grained flag — pair with -a for full control).' }
@@ -51,7 +51,7 @@ export const CODEX_COMMAND_GROUPS: CmdGroup[] = [
     title: 'AUTOMATION (HEADLESS)',
     items: [
       { cmd: 'codex -p "your prompt"', kind: 'cli', desc: 'Non-interactive print mode: run one prompt and exit.', usage: 'codex -p "summarise this file"' },
-      { cmd: 'CODEX_NON_INTERACTIVE=1 codex', kind: 'cli', desc: 'Suppress all interactive installer / first-run prompts. Set automatically by Munder Difflin in auto mode.' }
+      { cmd: 'CODEX_NON_INTERACTIVE=1 codex', kind: 'cli', desc: 'Suppress all interactive installer / first-run prompts. Set automatically by Hive in auto mode.' }
     ]
   },
   {

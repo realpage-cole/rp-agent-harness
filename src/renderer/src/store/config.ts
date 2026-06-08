@@ -58,6 +58,14 @@ export interface HarnessConfig {
   slackBotToken?: string;
   slackChannelId?: string;
   slackPort?: number;
+  /** Master toggle for Supabase collaborative sync (off by default). */
+  syncEnabled?: boolean;
+  /** Supabase project URL, e.g. https://xxxx.supabase.co. */
+  supabaseUrl?: string;
+  /** Supabase anon/publishable key (client-safe; RLS is the real guard). */
+  supabaseAnonKey?: string;
+  /** Shared team id stamped on every synced row. */
+  syncWorkspaceId?: string;
   costCapUsd?: number;
   /** Hard total-token ceiling across active agents (the user-facing budget). */
   costCapTokens?: number;
@@ -68,8 +76,8 @@ export interface HarnessConfig {
   circuitBreaker?: CircuitBreakerConfig;
 }
 
-/** The Sonnet model with the 1M-token context window — used for Michael's prep
- *  assistant (cheap, large-context context gathering). Mirrors ASSISTANT_MODEL
+/** The Sonnet model with the 1M-token context window — used for the orchestrator's
+ *  prep assistant (cheap, large-context context gathering). Mirrors ASSISTANT_MODEL
  *  in src/main/assistant.ts; keep the two in sync. */
 export const ASSISTANT_MODEL = 'claude-sonnet-4-6[1m]';
 

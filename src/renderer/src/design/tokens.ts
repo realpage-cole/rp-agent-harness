@@ -3,51 +3,51 @@
 
 export const colors = {
   cream: {
-    50: 0xfffdf5,
-    100: 0xfff8e7,
-    200: 0xf4e9c7,
-    300: 0xe8d9a0
+    50: 0xffffff,
+    100: 0xfafafa,
+    200: 0xf1f2f4,
+    300: 0xe4e6ea
   },
   paper: {
-    100: 0xfcfaf0,
-    200: 0xf0ead2
+    100: 0xffffff,
+    200: 0xf6f7f9
   },
   ink: {
-    900: 0x1a1320,
-    700: 0x3d2e4a,
-    500: 0x6b5878,
-    300: 0xa899b5,
-    100: 0xd9cfe0
+    900: 0x1b1f24,
+    700: 0x3a4048,
+    500: 0x6b727b,
+    300: 0xaab1ba,
+    100: 0xdce0e5
   },
   accent: {
-    coral: 0xff6b6b,
-    coralLight: 0xffb4b4,
-    mint: 0x6bcf7f,
-    mintLight: 0xb4e5bd,
-    sky: 0x4ecdc4,
-    skyLight: 0xa8e6e0,
-    lemon: 0xffd93d,
-    lemonLight: 0xffec99,
-    lilac: 0xb197fc,
-    lilacLight: 0xd6c5ff,
-    peach: 0xffa07a,
-    peachLight: 0xffd0b5
+    coral: 0x6366f1,
+    coralLight: 0xc7d2fe,
+    mint: 0x10b981,
+    mintLight: 0xa7f3d0,
+    sky: 0x0ea5e9,
+    skyLight: 0xbae6fd,
+    lemon: 0xf59e0b,
+    lemonLight: 0xfde68a,
+    lilac: 0x8b5cf6,
+    lilacLight: 0xddd6fe,
+    peach: 0xf97316,
+    peachLight: 0xfed7aa
   },
   status: {
-    idle: 0xa899b5,
-    thinking: 0x4ecdc4,
-    working: 0xffd93d,
-    blocked: 0xff6b6b,
-    success: 0x6bcf7f,
-    ghost: 0xd9cfe0
+    idle: 0xaab1ba,
+    thinking: 0x0ea5e9,
+    working: 0xf59e0b,
+    blocked: 0xef4444,
+    success: 0x10b981,
+    ghost: 0xdce0e5
   },
   world: {
-    grassLight: 0xd4eab0,
-    grassDark: 0xb5d589,
-    woodLight: 0xe5c896,
-    woodDark: 0xc9a66b,
-    path: 0xe8d8b0,
-    wall: 0x8b6f47
+    grassLight: 0xeef0f3,
+    grassDark: 0xe4e6ea,
+    woodLight: 0xf1f2f4,
+    woodDark: 0xdce0e5,
+    path: 0xf6f7f9,
+    wall: 0xaab1ba
   }
 } as const;
 
@@ -56,9 +56,9 @@ export const space = {
 } as const;
 
 export const type = {
-  display: '"Press Start 2P", monospace',
-  ui: '"Pixelify Sans", system-ui, sans-serif',
-  mono: '"VT323", "JetBrains Mono", monospace'
+  display: '"Inter", system-ui, -apple-system, "Segoe UI", sans-serif',
+  ui: '"Inter", system-ui, -apple-system, "Segoe UI", sans-serif',
+  mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace'
 } as const;
 
 export const tileSize = 32; // px — the world is built from 32×32 tiles

@@ -22,6 +22,51 @@ type SlackConfig = HarnessConfig & {
   webhookPort?: number;
 };
 
+/** Supabase sync fields live on the main-process config; the renderer mirror
+ *  declares them, but read them off a widened view to stay forgiving when the
+ *  loaded config predates them (same defensiveness as the Slack fields). */
+type SyncConfig = HarnessConfig & {
+  syncEnabled?: boolean;
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
+  syncWorkspaceId?: string;
+};
+
+/** Snapshot returned by `syncStatus()` and pushed on `onSyncEvent` (mirrors
+ *  src/main/sync SyncStatus — kept as a local view type so the renderer doesn't
+ *  cross into the preload package, same as the other status views here). The
+ *  `auth` block is the Phase-4 sign-in state; the main process never sends the
+ *  session itself across IPC, only this { signedIn, userId, email } summary. The
+ *  preload `SyncStatus` type may not declare it until Wave 3 reconciles, so we
+ *  widen it here (same convention as the Slack/Sync config views below). */
+interface SyncStatusView {
+  enabled: boolean;
+  configured: boolean;
+  running: boolean;
+  lastPushAt: number | null;
+  lastError: string | null;
+  pushed: { log: number; cost: number; history: number };
+  memory: { pushed: number; pulled: number };
+  /** Phase 3 shared state: rows pushed up / remote rows applied locally. */
+  state: { pushed: number; applied: number };
+  /** Phase 4 auth state — main-only session, renderer learns STATE only. */
+  auth?: { signedIn: boolean; userId: string | null; email: string | null };
+}
+
+/** Phase-4 auth / workspace IPC methods live on the main-process preload
+ *  bridge, but the renderer `CthApi` type may not declare them until Wave 3
+ *  wires the preload + reconciles. Read them off this widened view so this UI
+ *  can call them now (same forgiving-view convention as SyncStatusView and the
+ *  Slack/Sync config views). NEVER returns the session/tokens — only state. */
+type SyncAuthApi = {
+  syncSignIn?: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  syncSignOut?: () => Promise<{ ok: boolean }>;
+  syncCreateWorkspace?: (opts: { name: string }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+  syncJoinWorkspace?: (opts: { id: string }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+};
+/** The window.cth bridge widened with the not-yet-typed Phase-4 auth methods. */
+const cthAuth = (): SyncAuthApi => window.cth as unknown as SyncAuthApi;
+
 /** Pixel-aesthetic text input, mirroring AddAgentModal's inputStyle. */
 const slackInputStyle: CSSProperties = {
   width: '100%',
@@ -46,14 +91,14 @@ const slackLabelStyle: CSSProperties = {
 /** The exact connect walkthrough shown behind the i icon. Steps 6 & 7 spell out
  *  the both-lists requirement: subscribe to message.channels / message.groups in
  *  BOTH "Subscribe to bot events" AND "Subscribe to events on behalf of users". */
-const SLACK_CONNECT_STEPS = `Connect Munder Difflin to Slack
+const SLACK_CONNECT_STEPS = `Connect Hive to Slack
 
 1. api.slack.com/apps -> Create New App -> From scratch. Name it
-   "Munder Difflin" and pick your workspace.
+   "Hive" and pick your workspace.
 2. Basic Information -> Signing Secret -> copy it into the
    "Signing secret" field here.
 3. OAuth & Permissions -> Bot Token Scopes: add
-     chat:write          (office replies in-thread)
+     chat:write          (replies in-thread)
      channels:history    (read public-channel messages)
      groups:history      (read private-channel messages)
    Install to workspace, then copy the Bot User OAuth Token
@@ -71,7 +116,7 @@ const SLACK_CONNECT_STEPS = `Connect Munder Difflin to Slack
      message.channels
      message.groups
 8. Save Changes, reinstall if Slack prompts, then invite the bot
-   to your channel:  /invite @MunderDifflin`;
+   to your channel:  /invite @Hive`;
 
 /** The request/response contract shown behind the webhook i icon. `<endpoint>` is the
  *  public URL printed once the server starts; the secret/token go in headers so
@@ -182,6 +227,28 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
   // Whether the connect-steps help panel is expanded.
   const [showSlackHelp, setShowSlackHelp] = useState(false);
 
+  // --- Supabase collaborative sync ---
+  const syncCfg = config as SyncConfig;
+  const [syncEnabled, setSyncEnabled] = useState(syncCfg.syncEnabled ?? false);
+  const [syncUrl, setSyncUrl] = useState(syncCfg.supabaseUrl ?? '');
+  const [syncAnonKey, setSyncAnonKey] = useState(syncCfg.supabaseAnonKey ?? '');
+  const [syncWorkspace, setSyncWorkspace] = useState(syncCfg.syncWorkspaceId ?? '');
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncNote, setSyncNote] = useState('');
+  // Live status (running/counts/lastError), seeded from syncStatus() and kept
+  // fresh by onSyncEvent while the modal is open.
+  const [syncStatus, setSyncStatus] = useState<SyncStatusView | null>(null);
+  // --- Phase 4 auth (sign-in) + workspace. Email is fine to keep in form state;
+  // the PASSWORD is local-only, never persisted, cleared right after sign-in. The
+  // session itself lives in the main process and never reaches the renderer. ---
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNote, setAuthNote] = useState('');
+  // Workspace create/join controls (name to create, id to join).
+  const [wsName, setWsName] = useState('');
+  const [wsJoinId, setWsJoinId] = useState('');
+
   // --- Generic webhook + status API ---
   const [webhookEnabled, setWebhookEnabled] = useState(slackCfg.webhookEnabled ?? false);
   const [webhookSecret, setWebhookSecret] = useState(slackCfg.webhookSecret ?? '');
@@ -200,7 +267,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
     let alive = true;
     window.cth.getConfig().then((c) => {
       if (!alive) return;
-      const cc = c as BreakerCfgView & SlackConfig & { notifications?: boolean };
+      const cc = c as BreakerCfgView & SlackConfig & SyncConfig & { notifications?: boolean };
       setNotifications(cc.notifications === true);
       setAgentBudget(cc.costCapTokens != null ? String(cc.costCapTokens) : '');
       setVelocityCeiling(cc.circuitBreaker?.tokenVelocityPerMin != null ? String(cc.circuitBreaker.tokenVelocityPerMin) : '');
@@ -212,6 +279,10 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
       setWebhookEnabled(cc.webhookEnabled ?? false);
       setWebhookSecret(cc.webhookSecret ?? '');
       setWebhookPort(String(cc.webhookPort ?? 3849));
+      setSyncEnabled(cc.syncEnabled ?? false);
+      setSyncUrl(cc.supabaseUrl ?? '');
+      setSyncAnonKey(cc.supabaseAnonKey ?? '');
+      setSyncWorkspace(cc.syncWorkspaceId ?? '');
     }).catch(() => { /* keep prop-seeded values */ });
     // Hydrate live connection state + the persisted Request URL: the
     // tunnel URL lives in main, so reopening Settings while connected re-shows it.
@@ -225,7 +296,16 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
       setWebhookRunning(s.running);
       if (s.url) setWebhookUrl(s.url);
     }).catch(() => { /* status unavailable - assume not running */ });
-    return () => { alive = false; };
+    // Seed the sync snapshot, then keep it live via onSyncEvent. Both are
+    // best-effort: if the bridge isn't wired yet the section just shows blanks.
+    window.cth.syncStatus().then((s) => {
+      if (alive) setSyncStatus(s);
+    }).catch(() => { /* status unavailable - leave null */ });
+    let unsubSync: (() => void) | undefined;
+    try {
+      unsubSync = window.cth.onSyncEvent((s) => { if (alive) setSyncStatus(s); });
+    } catch { /* bridge not wired yet - no live updates */ }
+    return () => { alive = false; try { unsubSync?.(); } catch { /* noop */ } };
   }, []);
 
   /** Persist the current Slack inputs. Returns the resolved config patch. */
@@ -273,6 +353,126 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
     try { await window.cth.slackStop(); setRunning(false); setSlackNote('stopped'); }
     catch (e) { setSlackNote(e instanceof Error ? e.message : String(e)); }
     finally { setSlackBusy(false); }
+  };
+
+  // --- Supabase sync handlers ---
+  /** The config patch sent to main (mirrors SyncSettings field names). */
+  // Canonical config keys — must match the preload `syncSetConfig` surface and
+  // the main `sync:setConfig` handler, which read syncEnabled/supabaseUrl/
+  // supabaseAnonKey/syncWorkspaceId (NOT the SyncSettings short names).
+  const syncPatch = (enabled: boolean) => ({
+    supabaseUrl: syncUrl.trim(),
+    supabaseAnonKey: syncAnonKey.trim(),
+    syncWorkspaceId: syncWorkspace.trim(),
+    syncEnabled: enabled
+  });
+
+  const saveSync = async () => {
+    setSyncBusy(true); setSyncNote('');
+    try {
+      await window.cth.syncSetConfig(syncPatch(syncEnabled));
+      setSyncNote('saved');
+    } catch (e) {
+      setSyncNote(e instanceof Error ? e.message : String(e));
+    } finally { setSyncBusy(false); }
+  };
+
+  const startSync = async () => {
+    setSyncBusy(true); setSyncNote('');
+    try {
+      // Persist first so the manager starts with the latest url/key/workspace.
+      await window.cth.syncSetConfig(syncPatch(true));
+      setSyncEnabled(true);
+      const res = await window.cth.syncStart();
+      setSyncNote(res.ok ? 'syncing' : (res.error ?? 'failed to start'));
+      const s = await window.cth.syncStatus().catch(() => null);
+      if (s) setSyncStatus(s);
+    } catch (e) {
+      setSyncNote(e instanceof Error ? e.message : String(e));
+    } finally { setSyncBusy(false); }
+  };
+
+  const stopSync = async () => {
+    setSyncBusy(true); setSyncNote('');
+    try {
+      await window.cth.syncStop();
+      setSyncNote('stopped');
+      const s = await window.cth.syncStatus().catch(() => null);
+      if (s) setSyncStatus(s);
+    } catch (e) {
+      setSyncNote(e instanceof Error ? e.message : String(e));
+    } finally { setSyncBusy(false); }
+  };
+
+  // --- Phase 4 auth / workspace handlers ---
+  /** Refresh the sync snapshot after an auth/workspace change so the status line
+   *  + signed-in email reflect the new state immediately. */
+  const refreshSyncStatus = async () => {
+    const s = await window.cth.syncStatus().catch(() => null);
+    if (s) setSyncStatus(s as SyncStatusView);
+  };
+
+  const signIn = async () => {
+    setAuthBusy(true); setAuthNote('');
+    try {
+      const res = await cthAuth().syncSignIn?.(authEmail.trim(), authPassword);
+      if (res?.ok) {
+        setAuthPassword(''); // never keep the password around after a sign-in
+        setAuthNote('signed in');
+        await refreshSyncStatus();
+      } else {
+        setAuthNote(res?.error ?? 'sign-in failed');
+      }
+    } catch (e) {
+      setAuthNote(e instanceof Error ? e.message : String(e));
+    } finally { setAuthBusy(false); }
+  };
+
+  const signOut = async () => {
+    setAuthBusy(true); setAuthNote('');
+    try {
+      await cthAuth().syncSignOut?.();
+      setAuthPassword('');
+      setAuthNote('signed out');
+      await refreshSyncStatus();
+    } catch (e) {
+      setAuthNote(e instanceof Error ? e.message : String(e));
+    } finally { setAuthBusy(false); }
+  };
+
+  const createWorkspace = async () => {
+    setAuthBusy(true); setAuthNote('');
+    try {
+      const res = await cthAuth().syncCreateWorkspace?.({ name: wsName.trim() });
+      if (res?.ok) {
+        // Main persists syncWorkspaceId; mirror it into the visible field too.
+        if (res.id) setSyncWorkspace(res.id);
+        setWsName('');
+        setAuthNote(res.id ? `workspace ${res.id} created` : 'workspace created');
+        await refreshSyncStatus();
+      } else {
+        setAuthNote(res?.error ?? 'could not create workspace');
+      }
+    } catch (e) {
+      setAuthNote(e instanceof Error ? e.message : String(e));
+    } finally { setAuthBusy(false); }
+  };
+
+  const joinWorkspace = async () => {
+    setAuthBusy(true); setAuthNote('');
+    try {
+      const res = await cthAuth().syncJoinWorkspace?.({ id: wsJoinId.trim() });
+      if (res?.ok) {
+        if (res.id) setSyncWorkspace(res.id);
+        setWsJoinId('');
+        setAuthNote(res.id ? `joined ${res.id}` : 'joined workspace');
+        await refreshSyncStatus();
+      } else {
+        setAuthNote(res?.error ?? 'could not join workspace');
+      }
+    } catch (e) {
+      setAuthNote(e instanceof Error ? e.message : String(e));
+    } finally { setAuthBusy(false); }
   };
 
   // --- Generic webhook handlers ---
@@ -477,7 +677,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                   <Icon name="bell" />
                 </div>
                 <div style={{ flex: 1, fontSize: 15, lineHeight: '22px', color: 'var(--cth-ink-700)' }}>
-                  This permanently erases all of Michael's memories and the entire hive,
+                  This permanently erases all of the orchestrator's memories and the entire hive,
                   and cannot be undone. Any running sessions will be terminated and the app
                   will relaunch into onboarding. Are you sure?
                 </div>
@@ -641,7 +841,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                                 style={{ ...slackInputStyle, width: 180 }}
                               />
                               <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
-                                {fmtBudgetTokens(agentBudget) ? `= ${fmtBudgetTokens(agentBudget)} tokens` : 'total tokens across the floor'}
+                                {fmtBudgetTokens(agentBudget) ? `= ${fmtBudgetTokens(agentBudget)} tokens` : 'total tokens across the hive'}
                               </span>
                             </label>
                             <label style={{ display: 'flex', flexDirection: 'column', gap: 4, ...slackLabelStyle }}>
@@ -695,7 +895,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                               >i</button>
                             </span>
                             <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                              Pipe a Slack channel's messages straight into Michael's queue.
+                              Pipe a Slack channel's messages straight into the orchestrator's queue.
                             </span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -955,6 +1155,225 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                           </div>
                         )}
                       </div>
+
+                      <div style={{ height: 2, background: 'var(--cth-ink-300)' }} />
+
+                      {/* Supabase collaborative sync */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <div style={{
+                          fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
+                          color: 'var(--cth-ink-500)', textTransform: 'uppercase', marginBottom: 2
+                        }}>
+                          Sync
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 14, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                              Collaborative memory
+                            </span>
+                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                              Mirror this floor's history and agent memories to Supabase so a team can share them.
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{
+                              fontSize: 12, lineHeight: '16px',
+                              color: syncStatus?.running ? 'var(--cth-mint-700, #1f7a4d)' : 'var(--cth-ink-500)'
+                            }}>
+                              {syncStatus?.running ? '● Connected' : '○ Not connected'}
+                            </span>
+                            <PixelButton
+                              variant={syncEnabled ? 'primary' : 'secondary'}
+                              size="sm"
+                              onClick={() => setSyncEnabled((v) => !v)}
+                            >
+                              {syncEnabled ? 'on' : 'off'}
+                            </PixelButton>
+                          </div>
+                        </div>
+
+                        {syncEnabled && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            {/* Sign-in + workspace gate. RLS is now membership-scoped:
+                                rows sync only when signed in AND a workspace is set. */}
+                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                              Sign in and pick a workspace below. Sync only runs once you're
+                              signed in and a workspace is set — data is scoped to that team.
+                            </span>
+
+                            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              <span style={slackLabelStyle}>Supabase URL</span>
+                              <input
+                                value={syncUrl}
+                                onChange={(e) => setSyncUrl(e.target.value)}
+                                placeholder="https://xxxx.supabase.co"
+                                style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                              />
+                            </label>
+
+                            {/* Anon key: secret input, mirroring the Slack token field. */}
+                            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              <span style={slackLabelStyle}>Anon key</span>
+                              <input
+                                type="password"
+                                value={syncAnonKey}
+                                onChange={(e) => setSyncAnonKey(e.target.value)}
+                                placeholder="Supabase project -> Settings -> API -> anon key"
+                                style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                              />
+                            </label>
+
+                            <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                            {/* === Sign-in (Supabase Auth, email + password) ===
+                                Session lives only in main; the renderer learns auth
+                                STATE via syncStatus().auth. The password is local form
+                                state, never persisted, cleared right after sign-in. */}
+                            <div style={{
+                              fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
+                              color: 'var(--cth-ink-500)', textTransform: 'uppercase'
+                            }}>
+                              Sign in
+                            </div>
+                            {syncStatus?.auth?.signedIn ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                <span style={{ fontSize: 14, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                  Signed in as{' '}
+                                  <span style={{ fontFamily: 'var(--cth-font-mono)' }}>
+                                    {syncStatus.auth.email ?? syncStatus.auth.userId ?? 'account'}
+                                  </span>
+                                </span>
+                                <PixelButton variant="secondary" size="sm" onClick={signOut} disabled={authBusy}>
+                                  sign out
+                                </PixelButton>
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{ display: 'flex', gap: 16 }}>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>Email</span>
+                                    <input
+                                      type="email"
+                                      value={authEmail}
+                                      onChange={(e) => setAuthEmail(e.target.value)}
+                                      placeholder="you@team.com"
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>Password</span>
+                                    <input
+                                      type="password"
+                                      value={authPassword}
+                                      onChange={(e) => setAuthPassword(e.target.value)}
+                                      placeholder="••••••••"
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <PixelButton variant="primary" size="sm" onClick={signIn} disabled={authBusy || !authEmail.trim() || !authPassword}>
+                                    {authBusy ? '...' : 'sign in'}
+                                  </PixelButton>
+                                  {authNote && (
+                                    <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{authNote}</span>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                            {/* Surface the auth note while signed in too (sign-out / workspace ops). */}
+                            {syncStatus?.auth?.signedIn && authNote && (
+                              <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{authNote}</span>
+                            )}
+
+                            {/* === Workspace: create or join. ensureWorkspace runs in
+                                main and persists syncWorkspaceId; we mirror the id here. */}
+                            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              <span style={slackLabelStyle}>Workspace id</span>
+                              <input
+                                value={syncWorkspace}
+                                onChange={(e) => setSyncWorkspace(e.target.value)}
+                                placeholder="created or joined below — scopes every synced row"
+                                style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                              />
+                            </label>
+
+                            <div style={{ display: 'flex', gap: 16 }}>
+                              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                <span style={slackLabelStyle}>Create workspace (name)</span>
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                  <input
+                                    value={wsName}
+                                    onChange={(e) => setWsName(e.target.value)}
+                                    placeholder="e.g. Hive"
+                                    style={{ ...slackInputStyle }}
+                                  />
+                                  <PixelButton variant="secondary" size="sm" onClick={createWorkspace} disabled={authBusy || !wsName.trim() || !syncStatus?.auth?.signedIn}>
+                                    create
+                                  </PixelButton>
+                                </div>
+                              </label>
+                              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                <span style={slackLabelStyle}>Join workspace (id)</span>
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                  <input
+                                    value={wsJoinId}
+                                    onChange={(e) => setWsJoinId(e.target.value)}
+                                    placeholder="paste an existing workspace id"
+                                    style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                  />
+                                  <PixelButton variant="secondary" size="sm" onClick={joinWorkspace} disabled={authBusy || !wsJoinId.trim() || !syncStatus?.auth?.signedIn}>
+                                    join
+                                  </PixelButton>
+                                </div>
+                              </label>
+                            </div>
+
+                            <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <PixelButton variant="primary" size="sm" onClick={startSync} disabled={syncBusy || !syncUrl.trim() || !syncAnonKey.trim() || !syncWorkspace.trim() || !syncStatus?.auth?.signedIn || syncStatus?.running}>
+                                {syncBusy ? '...' : syncStatus?.running ? 'connected' : 'start'}
+                              </PixelButton>
+                              <PixelButton variant="secondary" size="sm" onClick={stopSync} disabled={syncBusy || !syncStatus?.running}>
+                                stop
+                              </PixelButton>
+                              <PixelButton variant="ghost" size="sm" onClick={saveSync} disabled={syncBusy}>
+                                save
+                              </PixelButton>
+                              {syncNote && (
+                                <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{syncNote}</span>
+                              )}
+                            </div>
+
+                            {/* Live push/pull counts + last error from the status snapshot. */}
+                            {syncStatus && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                {/* Auth + workspace summary, ahead of the byte counters. */}
+                                <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                  auth: {syncStatus.auth?.signedIn
+                                    ? `signed in${syncStatus.auth.email ? ` (${syncStatus.auth.email})` : ''}`
+                                    : 'signed out'}
+                                  {'  ·  '}
+                                  workspace: {syncWorkspace.trim() ? syncWorkspace.trim() : 'none'}
+                                </span>
+                                <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                  pushed: {syncStatus.pushed.log} log / {syncStatus.pushed.cost} cost / {syncStatus.pushed.history} history
+                                  {'  ·  '}
+                                  memory: {syncStatus.memory.pushed} pushed / {syncStatus.memory.pulled} pulled
+                                  {'  ·  '}
+                                  state: {syncStatus.state.pushed} pushed / {syncStatus.state.applied} applied
+                                </span>
+                                {syncStatus.lastError && (
+                                  <span style={{ fontSize: 12, lineHeight: '16px', color: '#6E1423' }}>
+                                    {syncStatus.lastError}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </>
                   )}
 
@@ -966,7 +1385,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                         color: '#6E1423'
                       }}>DANGER ZONE</div>
                       <p style={{ margin: 0, fontSize: 14, lineHeight: '20px', color: 'var(--cth-ink-700)' }}>
-                        Reset wipes Michael's memories, the entire hive (every agent, message,
+                        Reset wipes the orchestrator's memories, the entire hive (every agent, message,
                         task, and the board), the semantic-memory palace, and all settings -
                         then takes you back to onboarding.
                       </p>

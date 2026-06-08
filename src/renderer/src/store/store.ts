@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import type { AccentColorName } from '@/design/tokens';
-import type { OfficeCharacterName } from '@/scene/office/cast';
 import type { StatusKind } from '@/components/PixelBadge';
 import type { AgentProvider } from '@shared/agentProvider';
 
@@ -26,8 +25,6 @@ export interface BlockReason {
 export interface Agent {
   id: string;
   name: string;
-  /** which Office character represents this agent on the floor */
-  character: OfficeCharacterName;
   accent: AccentColorName;
   /** persistent short context — what is this agent for (shown on the floor) */
   description: string;
@@ -58,13 +55,12 @@ export interface Agent {
   /** the model this agent runs on (e.g. 'claude-sonnet-4-6[1m]' or 'gemini-3-pro');
    *  drives the model selector + the --model arg used when (re)spawning the agent */
   model?: string;
-  /** the last prompt the user submitted to this agent in Claude Code —
-   *  shown on the floor as a card above the seated avatar */
+  /** the last prompt the user submitted to this agent in Claude Code */
   lastPrompt?: string;
-  /** the orchestrator ("god") agent — seated in Michael's room, runs the floor */
+  /** the orchestrator ("god") agent — coordinates the team */
   isGod?: boolean;
-  /** Michael's prep assistant — send-only; enriches prompts and forwards them to
-   *  the god. Excluded from broadcast fan-out and from the restorable-dead sweep. */
+  /** the orchestrator's prep assistant — send-only; enriches prompts and forwards
+   *  them to the god. Excluded from broadcast fan-out and from the restorable-dead sweep. */
   isAssistant?: boolean;
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */
@@ -94,16 +90,16 @@ export interface QueuedMessage {
   text: string;
   /** epoch ms the message was queued — drives ordering and the "queued 2m ago" hint */
   ts: number;
-  /** Slack-originated: thread coordinates so the office can reply in-thread. */
+  /** Slack-originated: thread coordinates so the hive can reply in-thread. */
   slack?: { channel: string; thread_ts: string };
 }
 
 export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces';
 
-/** Lifecycle of the god agent ("Michael") bootstrap on launch.
- *  'booting' until his PTY is confirmed live, then 'ready' (or 'failed' if the
- *  spawn errored). The empty-floor UI shows a loader while 'booting' so users
- *  don't see the "add agent" prompt before Michael has clocked in. */
+/** Lifecycle of the god agent (orchestrator) bootstrap on launch.
+ *  'booting' until its PTY is confirmed live, then 'ready' (or 'failed' if the
+ *  spawn errored). The empty-dashboard UI shows a loader while 'booting' so users
+ *  don't see the "add agent" prompt before the orchestrator has started. */
 export type GodStatus = 'booting' | 'ready' | 'failed';
 
 interface State {
@@ -148,12 +144,12 @@ interface State {
   removeArchivedAgent: (id: string) => void;
   /** Drop one agent from the restorable list (it was respawned or dismissed). */
   removeRestorableAgent: (id: string) => void;
-  /** One-shot request to open a Command-Center tab (e.g. clicking the office
-   *  task board → 'tasks'). `seq` makes repeated identical requests distinct. */
+  /** One-shot request to open a Command-Center tab (e.g. clicking a dashboard
+   *  task link → 'tasks'). `seq` makes repeated identical requests distinct. */
   ccTabRequest: { tab: string; seq: number } | null;
   requestCommandCenterTab: (tab: string) => void;
-  /** The task whose detail overlay is open (rendered app-wide over the office
-   *  floor — the card content grows: contracts, deps, the human Q&A trail). */
+  /** The task whose detail overlay is open (rendered app-wide — the card content
+   *  grows: contracts, deps, the human Q&A trail). */
   taskDetailId: string | null;
   openTaskDetail: (id: string) => void;
   closeTaskDetail: () => void;

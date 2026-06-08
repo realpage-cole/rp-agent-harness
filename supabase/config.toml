@@ -1,0 +1,17 @@
+# Supabase project config.
+#
+# The Supabase GitHub integration (and `supabase db push`) keys off project_id to
+# link THIS repo's supabase/migrations/* to the hosted project, applying any
+# not-yet-applied migrations on merge. project_id is the project ref — the
+# subdomain in the project URL (https://<project_id>.supabase.co) — and is public
+# (it ships in every client API URL), so committing it is fine. Secrets (anon key,
+# service_role key, DB password) are NOT stored here.
+#
+# The remaining [...] sections only affect local `supabase start`; remote deploy
+# uses just project_id + the migrations. Run `supabase init` to expand this file
+# with the full local-dev defaults if you start developing against a local stack.
+project_id = "mvbaaqgeocczpzdengfn"
+
+[db]
+# Match the hosted project's Postgres major version (Supabase defaults to 15+).
+major_version = 15

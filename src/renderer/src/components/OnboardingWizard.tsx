@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
-import { SpritePortrait } from './SpritePortrait';
+import { Avatar } from './Avatar';
 import type { HarnessConfig } from '@/store/config';
 
 export interface OnboardingWizardProps {
@@ -93,14 +93,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             {step === 'welcome' && (
               <>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <div style={{
-                    width: 64, height: 64,
-                    background: 'var(--cth-sky-light)',
-                    boxShadow: 'inset 0 0 0 2px var(--cth-ink-900)',
-                    display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden'
-                  }}>
-                    <SpritePortrait character="michael" scale={2} />
-                  </div>
+                  <Avatar name="Hive" accent="sky" size={64} />
                   <div>
                     <div style={{
                       fontFamily: 'var(--cth-font-display)',
@@ -152,9 +145,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             {step === 'repos' && (
               <>
                 <p style={{ margin: 0, lineHeight: '22px' }}>
-                  Add the existing repos you want claude agents to run on. Each one becomes
-                  a room on the floor — multiple agents can live in the same repo. You can
-                  add more later.
+                  Add the existing repos you want claude agents to run on — multiple agents
+                  can work in the same repo. You can add more later.
                 </p>
                 <div style={{
                   display: 'flex', flexDirection: 'column', gap: 6,

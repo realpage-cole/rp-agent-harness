@@ -1,12 +1,10 @@
 import { PixelPanel } from './PixelPanel';
 import { PixelBadge, StatusKind } from './PixelBadge';
-import { SpritePortrait } from './SpritePortrait';
+import { Avatar } from './Avatar';
 import { AccentColorName } from '@/design/tokens';
-import { OfficeCharacterName } from '@/scene/office/cast';
 
 export interface AgentCardProps {
   name: string;
-  character: OfficeCharacterName;
   accent: AccentColorName;
   status: StatusKind;
   project: string;
@@ -30,7 +28,7 @@ export interface AgentCardProps {
 const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 
 export function AgentCard({
-  name, character, accent, status, project, action, progress = 0,
+  name, accent, status, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick,
   doingCount = 0, onTaskNoteClick
 }: AgentCardProps) {
@@ -75,13 +73,11 @@ export function AgentCard({
       >
         <div style={{ display: 'flex', gap: 8, height: '100%' }}>
           <div style={{
-            width: 44, height: 64,
-            background: `var(--cth-${accent}-light)`,
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-            display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden',
+            width: 44,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
             flexShrink: 0
           }}>
-            <SpritePortrait character={character} scale={2} />
+            <Avatar name={name} accent={accent} size={40} />
           </div>
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between' }}>

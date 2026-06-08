@@ -54,7 +54,7 @@ export function FullscreenFileEditor() {
           color: 'var(--cth-ink-900)'
         }}
       >
-        MUNDER DIFFLIN · FILE
+        HIVE · FILE
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
         <CodeEditor

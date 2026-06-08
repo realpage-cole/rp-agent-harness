@@ -130,10 +130,10 @@ function stepAgent(agent: Agent) {
 
 const MOCK_ACTS = ['request', 'inform', 'propose', 'query', 'agree'] as const;
 
-/** Occasionally fire a synthetic agent-to-agent message so the office floor's
- *  envelope-handoff animation is visible in demo mode (no live hive routing
- *  happens without real `claude` agents). The scene listens for this event and
- *  flies an envelope between the two avatars; see OfficeFloor's demo path. */
+/** Occasionally fire a synthetic agent-to-agent message so message routing is
+ *  visible in demo mode (no live hive routing happens without real `claude`
+ *  agents). The store/dashboard listens for this event and reflects the handoff
+ *  between the two agents. */
 function maybeFlyMessage(mockIds: string[]): void {
   if (mockIds.length < 2 || Math.random() >= 0.45) return;
   const from = mockIds[Math.floor(Math.random() * mockIds.length)];

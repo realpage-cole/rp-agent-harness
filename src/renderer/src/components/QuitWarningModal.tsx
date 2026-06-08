@@ -15,7 +15,7 @@ export interface ClosingTimeState {
 export interface QuitWarningModalProps {
   ptyCount: number;
   /** Non-null while the closing-time protocol runs — switches the dialog into
-   *  the "wrapping up the floor" progress view. */
+   *  the "wrapping up" progress view. */
   closing?: ClosingTimeState | null;
   onCancel: () => void;
   onConfirm: () => void;
@@ -71,10 +71,10 @@ export function QuitWarningModal({ ptyCount, closing, onCancel, onConfirm, onClo
                       marginBottom: 4
                     }}>
                       {closing!.phase === 'complete'
-                        ? 'FLOOR SAVED — SEE YOU TOMORROW'
+                        ? 'WORK SAVED — SEE YOU TOMORROW'
                         : closing!.phase === 'timeout'
                           ? 'STILL WRAPPING UP…'
-                          : 'WRAPPING UP THE FLOOR'}
+                          : 'WRAPPING UP'}
                     </div>
                     <div style={{ fontSize: 15, lineHeight: '22px', color: 'var(--cth-ink-700)' }}>
                       {closing!.phase === 'complete' ? (
@@ -100,7 +100,7 @@ export function QuitWarningModal({ ptyCount, closing, onCancel, onConfirm, onClo
                 }}>
                   {closing!.total > 0
                     ? `${closing!.acked} / ${closing!.total} WORKERS CONFIRMED${closing!.acked >= closing!.total ? ' — WAITING FOR THE ORCHESTRATOR' : ''}`
-                    : 'NO WORKERS ON THE FLOOR — WAITING FOR THE ORCHESTRATOR'}
+                    : 'NO ACTIVE WORKERS — WAITING FOR THE ORCHESTRATOR'}
                   {closing!.phase === 'timeout' && (
                     <div style={{ marginTop: 6, fontFamily: 'var(--cth-font-body, inherit)' }}>
                       This is taking a while (an agent may be mid-compaction or deep in a
@@ -162,7 +162,7 @@ export function QuitWarningModal({ ptyCount, closing, onCancel, onConfirm, onClo
                 }}>
                   Tip: <strong>closing time</strong> is the safe way out — the orchestrator has
                   every agent commit its work and save its memory, and the app closes itself
-                  once the whole floor has confirmed. No data loss.
+                  once the whole team has confirmed. No data loss.
                 </div>
 
                 {closing?.phase === 'error' && (
