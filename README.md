@@ -145,12 +145,49 @@ terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
 - *Optional:* the semantic memory index for instant cross-session recall (the app works without it —
   markdown memory still functions).
 
+### RealPage corporate network setup
+
+On the RealPage network, Palo Alto Prisma performs TLS inspection and presents a
+**RealPage-signed certificate** for outbound HTTPS. Node and npm don't trust that
+CA out of the box, so `npm install` fails in `postinstall` with
+`SELF_SIGNED_CERT_IN_CHAIN` when `node-gyp`/`electron-rebuild` and the `electron`
+package try to download native build headers and the Electron runtime. Do this
+**once per machine** before installing:
+
+```bash
+# 1. Export the RealPage CA chain from the macOS keychain into a PEM file.
+CA="$HOME/.realpage-ca.pem"
+security find-certificate -a -p -c "RealPage" /Library/Keychains/System.keychain > "$CA"
+security find-certificate -a -p -c "RealPage" /System/Library/Keychains/SystemRootCertificates.keychain >> "$CA"
+
+# 2. Point npm at it (persists in ~/.npmrc).
+npm config set cafile "$CA"
+
+# 3. Point Node itself at it, for downloads that don't read npm's config
+#    (e.g. the Electron runtime). Add to ~/.zshrc so it sticks.
+echo 'export NODE_EXTRA_CA_CERTS="$HOME/.realpage-ca.pem"' >> ~/.zshrc
+export NODE_EXTRA_CA_CERTS="$HOME/.realpage-ca.pem"
+```
+
+Do **not** use `npm config set strict-ssl false` — trusting the corporate CA is
+the correct, scoped fix.
+
+> **Node 24 note:** the `electron` installer unpacks its runtime with a library
+> that silently truncates the extract on Node 24, leaving an unlaunchable app
+> ("Electron uninstall"). This repo's `postinstall` runs `tools/ensure-electron.cjs`,
+> which detects the broken extract and re-unpacks the runtime with the OS `unzip`
+> automatically — no action needed. It's a no-op on Node versions where the bug
+> isn't present.
+
+> **Tip:** clone to a plain local path (e.g. `~/Code`), not a cloud-synced folder
+> like OneDrive — background sync can lock or de-hydrate `node_modules` files mid-build.
+
 ### Install & run
 
 ```bash
-git clone https://github.com/chaitanyagiri/munder-difflin.git
-cd munder-difflin
-npm install        # postinstall rebuilds node-pty against Electron's ABI
+git clone https://github.com/realpage-cole/rp-agent-harness.git
+cd rp-agent-harness
+npm install        # postinstall rebuilds node-pty + heals the Electron runtime extract
 npm run dev        # launches the Electron app with hot reload
 ```
 
