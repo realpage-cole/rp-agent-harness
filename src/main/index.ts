@@ -23,6 +23,7 @@ import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens } from './transcript';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
+import { SyncManager } from './sync';
 import { WebhookServer, type WebhookInbound, type WebhookTaskStatus } from './webhook';
 import { TelemetryCollector } from './telemetry';
 import { ControlRegistry } from './control';
@@ -72,8 +73,8 @@ const breaker = new CircuitBreaker(() => {
   return { ...(c.circuitBreaker ?? {}), costCapUsd: c.costCapUsd, costCapTokens: c.costCapTokens, agentTokenCaps: c.agentTokenCaps };
 });
 // Always-on beats (decoupled from the optional heartbeat): the live fleet snapshot
-// Michael reads + the breaker beat, so guardrails + monitoring work even when the
-// heartbeat mission is disabled (it ships off).
+// the orchestrator reads + the breaker beat, so guardrails + monitoring work even
+// when the heartbeat mission is disabled (it ships off).
 let fleetTimer: ReturnType<typeof setInterval> | null = null;
 let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
 // Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
@@ -111,6 +112,44 @@ const reflector = new MemoryReflector(
 // Durable harness state (SQLite, main process). Phase A: window bounds (kv) +
 // net-new command history. Opened in whenReady, closed in the teardown blocks.
 const persist = new PersistStore();
+// Supabase collaborative sync (optional, off by default). Pushes the append-only
+// hive sinks + two-way agent memory to a shared workspace so a team shares one
+// logical hive while every machine stays local-first. A complete no-op unless
+// syncEnabled + url/anonKey/workspaceId are all set; the supabase client is a
+// lazily-imported OPTIONAL dep, so the app boots fine without it installed.
+// Config is read fresh each tick so a Settings change applies on the next beat.
+const syncManager = new SyncManager(
+  () => {
+    const c = readConfig();
+    return {
+      enabled: c.syncEnabled === true,
+      url: c.supabaseUrl ?? '',
+      anonKey: c.supabaseAnonKey ?? '',
+      workspaceId: c.syncWorkspaceId ?? ''
+    };
+  },
+  () => readConfig().harnessHome,
+  persist,
+  {
+    emit: (channel, payload) => {
+      const wc = liveWebContents();
+      if (wc) try { wc.send(channel, payload); } catch { /* window tore down */ }
+    },
+    // A pull that wrote new mirror memories asks the janitor to re-mine so the
+    // teammate's memory shows up in this machine's palace.
+    requestMine: () => { try { void memory.mineNow(); } catch { /* best-effort */ } },
+    // Phase 3 — the HiveBridge seam to the hive's shared state. sync/state.ts
+    // stays PURE TRANSPORT (it knows the DB schema, not the hive file shapes);
+    // the HiveManager owns all registry/tasks/board <-> DB shaping + the LWW
+    // merge. readStateRows shapes the local state into DB-column-ready domain
+    // rows for the 60s push; applyStateRows merges remote rows (last-writer-wins,
+    // additive) on realtime/catch-up pull. Both are best-effort inside hive.ts.
+    hive: {
+      readStateRows: () => hive.readStateRows(),
+      applyStateRows: (r) => hive.applyStateRows(r)
+    }
+  }
+);
 let mainWindow: BrowserWindow | null = null;
 
 /** When true, skip the quit interceptor (user already confirmed). */
@@ -287,12 +326,12 @@ function ensureDefaultMissions(): void {
 
 // ─── Heartbeat (Lane A #1) + circuit-breaker beat (#6.6b) ────────────────────
 
-/** Is the floor quiet? Derived ONLY from signals the main process owns or can
+/** Is the team quiet? Derived ONLY from signals the main process owns or can
  *  stat — log.jsonl mtime (the master signal: every routed msg/drain/spawn/task
  *  append touches it), each agent's inbox + outbox/.sent mtimes, and every live
  *  PTY's lastOutputAt (an agent printing/thinking counts as activity). Crucially
  *  NOT registry.status, which is written 'idle' once at spawn and never
- *  transitions in main — reading it would see the floor quiet forever. */
+ *  transitions in main — reading it would see the team quiet forever. */
 function isFloorQuiet(thresholdMs: number): boolean {
   const root = hive.root();
   if (!root) return false;
@@ -358,7 +397,7 @@ function buildHeartbeatDigest(quietMs: number): string {
   const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
   const withInbox = active.filter(([id]) => hive.inbox(id).length > 0).map(([, a]) => a.name);
   return [
-    `Floor heartbeat — quiet ~${Math.round(quietMs / 60000)}m.`,
+    `Idle heartbeat — quiet ~${Math.round(quietMs / 60000)}m.`,
     `Active agents (${active.length}): ${names}.`,
     withInbox.length ? `Undrained inbox: ${withInbox.join(', ')}.` : 'No undrained inboxes.',
     '',
@@ -426,7 +465,7 @@ function runBreakerBeat(progressWindowMs: number): void {
   }
 }
 
-/** Build + write the live fleet snapshot Michael reads (`<hive>/fleet.json`).
+/** Build + write the live fleet snapshot the orchestrator reads (`<hive>/fleet.json`).
  *  Always-on (independent of the heartbeat) since `claude agents` can't see the
  *  hive's sibling sessions. PII-free; never throws (called from a timer). */
 function writeFleetSnapshot(): void {
@@ -464,7 +503,7 @@ function writeFleetSnapshot(): void {
 
 /** Arm the heartbeat with an adaptive, self-rescheduling cadence (recursive
  *  setTimeout instead of a fixed setInterval). Each beat runs the cost/breaker
- *  pass, re-engages a quiet floor, stamps lastFiredAt, then re-arms: ~base on a
+ *  pass, re-engages a quiet team, stamps lastFiredAt, then re-arms: ~base on a
  *  normal beat, base/4 (min 30s) when an agent looks stuck, base*2.5 right after
  *  a re-engage. Registered into missionTimers so shutdown tears it down. */
 function armHeartbeat(m: ScheduledMission): void {
@@ -504,7 +543,7 @@ function liveWebContents(): Electron.WebContents | null {
   return wc && !wc.isDestroyed() ? wc : null;
 }
 
-// ─── Slack webhook server (Slack message → Michael's queue) ──────────────────
+// ─── Slack webhook server (Slack message → the orchestrator's queue) ─────────
 /** The running Slack ingestion server, or null when disabled/stopped. */
 let slackServer: SlackWebhookServer | null = null;
 /** The loopback-only reply endpoint (lets the bundled helper post back to Slack
@@ -719,7 +758,7 @@ function hashWebhookToken(token: string): string {
 }
 
 /** Turn a verified webhook POST into hive work: create ONE stamped kanban card
- *  (origin + token hash) and route the message to god/Michael's inbox as a
+ *  (origin + token hash) and route the message to god/the orchestrator's inbox as a
  *  request. Returns the raw capability token + card id to hand back to the caller
  *  (the ONLY echo of the token). The secret never reaches here. Returns null only
  *  if the card — the thing the caller will poll — could not be created. */
@@ -751,7 +790,7 @@ function handleWebhookMessage(msg: WebhookInbound): { token: string; taskId: str
     return null;
   }
 
-  // 2) Route the work to god/Michael (god inbox request). Body carries ONLY the
+  // 2) Route the work to god/the orchestrator (god inbox request). Body carries ONLY the
   //    user message + the card id (so whoever finishes it updates that card's
   //    status/result for the caller's GET) — never the secret or the raw token.
   //    Best-effort: the card already exists and is pollable even if this hiccups.
@@ -863,7 +902,7 @@ function createWindow(): void {
     ...(saved && saved.x !== undefined && saved.y !== undefined ? { x: saved.x, y: saved.y } : {}),
     minWidth: MIN_WIN.width,
     minHeight: MIN_WIN.height,
-    title: 'Munder Difflin',
+    title: 'Hive',
     backgroundColor: '#FFF8E7',
     titleBarStyle: 'hiddenInset',
     show: false,
@@ -1142,6 +1181,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
+  try { syncManager.stop(); } catch { /* best-effort */ }
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
@@ -1278,7 +1318,7 @@ ipcMain.handle('history:search', (_evt, query: unknown, limit: unknown) =>
 
 // ─── IPC: quit confirmation ─────────────────────────────────────────────────
 /** Tear the harness down and quit. Shared by the hard "kill all & quit" path
- *  and the closing-time conclusion (after the god confirmed the floor saved). */
+ *  and the closing-time conclusion (after the god confirmed the team saved). */
 function teardownAndQuit(): void {
   allowQuit = true;
   // Each teardown step is best-effort: a throw here (e.g. a dying child or a
@@ -1288,6 +1328,7 @@ function teardownAndQuit(): void {
   try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[quit] slack.stop:', e); }
+  try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[quit] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
@@ -1331,11 +1372,12 @@ ipcMain.handle('app:resetAll', () => {
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
+  try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
-  // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
+  // Erase the hive (the orchestrator's + every agent's memory, inboxes, tasks, board,
   // git history) and the semantic-memory palace. Only these harness-created
   // subdirs are removed — never the user's whole harnessHome folder.
   for (const dir of [hive.root(), memory.palacePath()]) {
@@ -1524,6 +1566,97 @@ ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   return { ok: true };
 });
 
+/** Adopt a workspace id as `syncWorkspaceId` and reconcile the running client:
+ *  (re)start when enabled + fully configured (which now includes the workspace
+ *  id and a signed-in user, gated inside the manager), else stop. Returns the
+ *  adopted id; NEVER tokens. Shared by sync:createWorkspace/joinWorkspace after
+ *  the SyncManager has written the workspaces/members DB rows. */
+async function adoptWorkspaceId(id: string): Promise<{ ok: boolean; id?: string; error?: string }> {
+  writeConfig({ syncWorkspaceId: id });
+  const cfg = readConfig();
+  const fullyConfigured = !!cfg.supabaseUrl && !!cfg.supabaseAnonKey && !!cfg.syncWorkspaceId;
+  if (cfg.syncEnabled && fullyConfigured) {
+    const r = await syncManager.start();
+    return { ...r, id };
+  }
+  syncManager.stop();
+  return { ok: true, id };
+}
+
+// ─── IPC: Supabase collaborative sync ───────────────────────────────────────
+/** Bring sync up (lazy-imports the supabase client; gated on enabled+configured). */
+ipcMain.handle('sync:start', () => syncManager.start());
+ipcMain.handle('sync:stop', () => { syncManager.stop(); return { ok: true }; });
+/** Snapshot for the Settings badge (enabled/configured/running + counters). */
+ipcMain.handle('sync:status', () => syncManager.status());
+/** Persist sync settings, then reconcile the running client: start when fully
+ *  configured + enabled, otherwise stop. Only the provided keys are written
+ *  (writeConfig spreads, so undefined keys are never sent). */
+ipcMain.handle('sync:setConfig', (_evt, patch: unknown) => {
+  const p = (patch ?? {}) as {
+    syncEnabled?: unknown; supabaseUrl?: unknown; supabaseAnonKey?: unknown; syncWorkspaceId?: unknown;
+  };
+  const next: Partial<HarnessConfig> = {};
+  if (typeof p.syncEnabled === 'boolean') next.syncEnabled = p.syncEnabled;
+  // Trim string fields; an emptied field clears back to undefined.
+  if (typeof p.supabaseUrl === 'string') next.supabaseUrl = p.supabaseUrl.trim() || undefined;
+  if (typeof p.supabaseAnonKey === 'string') next.supabaseAnonKey = p.supabaseAnonKey.trim() || undefined;
+  if (typeof p.syncWorkspaceId === 'string') next.syncWorkspaceId = p.syncWorkspaceId.trim() || undefined;
+  writeConfig(next);
+  const cfg = readConfig();
+  const fullyConfigured = !!cfg.supabaseUrl && !!cfg.supabaseAnonKey && !!cfg.syncWorkspaceId;
+  if (cfg.syncEnabled && fullyConfigured) return syncManager.start();
+  syncManager.stop();
+  return { ok: true, running: false };
+});
+
+// ─── IPC: Supabase Auth (Phase 4) ───────────────────────────────────────────
+// Sign-in/out delegate to the SyncManager, which owns the in-memory auth state
+// and persists the session (tokens) MAIN-side in the store kv. CRITICAL: these
+// handlers NEVER return tokens — only {ok,error?}. The renderer learns auth
+// STATE solely via the tokenless `auth` field on the sync status snapshot
+// (sync:status / the sync:event broadcast).
+/** Sign in with email/password. Brings the client up if needed, persists the
+ *  session MAIN-side, (re)arms the loops if now runnable, and broadcasts a fresh
+ *  status. Returns ONLY {ok,error?}. */
+ipcMain.handle('sync:signIn', (_evt, email: unknown, password: unknown) => {
+  if (typeof email !== 'string' || typeof password !== 'string') {
+    return { ok: false, error: 'email and password are required' };
+  }
+  return syncManager.signIn(email, password);
+});
+/** Sign out: clears the persisted session + in-memory auth and stops the loops
+ *  (the client stays up so a new signIn can be issued). */
+ipcMain.handle('sync:signOut', async () => { await syncManager.signOut(); return { ok: true }; });
+/** Create a new workspace (name) and adopt its id as `syncWorkspaceId`, then
+ *  (re)start so the loops arm against it. The DB rows (INSERT workspaces + this
+ *  user's workspace_members row) are written by SyncManager.createWorkspace via
+ *  auth.ensureWorkspace, using the signed-in client that lives inside the manager
+ *  so RLS sees auth.uid(); this handler only persists the returned id + restarts.
+ *  NEVER returns tokens — only {ok, id?, error?}. */
+ipcMain.handle('sync:createWorkspace', async (_evt, opts: unknown) => {
+  const o = (opts ?? {}) as { name?: unknown };
+  if (typeof o.name !== 'string' || !o.name.trim()) {
+    return { ok: false, error: 'workspace name is required' };
+  }
+  const r = await syncManager.createWorkspace(o.name.trim());
+  if (!r.ok || !r.workspaceId) return { ok: false, error: r.error ?? 'could not create workspace' };
+  return adoptWorkspaceId(r.workspaceId);
+});
+/** Join an existing workspace by id: SyncManager.joinWorkspace writes this user's
+ *  `workspace_members` row (via auth.ensureWorkspace, signed-in client → RLS sees
+ *  auth.uid()), then we adopt the id as `syncWorkspaceId` and (re)start so the
+ *  loops scope to it. NEVER returns tokens — only {ok, id?, error?}. */
+ipcMain.handle('sync:joinWorkspace', async (_evt, opts: unknown) => {
+  const o = (opts ?? {}) as { id?: unknown };
+  if (typeof o.id !== 'string' || !o.id.trim()) {
+    return { ok: false, error: 'workspace id is required' };
+  }
+  const r = await syncManager.joinWorkspace(o.id.trim());
+  if (!r.ok || !r.workspaceId) return { ok: false, error: r.error ?? 'could not join workspace' };
+  return adoptWorkspaceId(r.workspaceId);
+});
+
 // ─── IPC: Generic webhook + status API ──────────────────────────────────────
 ipcMain.handle('webhook:start', () => startWebhookServer());
 ipcMain.handle('webhook:stop', () => { stopWebhookServer(); return { ok: true }; });
@@ -1573,7 +1706,7 @@ function bootstrapHiveServices(): void {
   reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
 
   // Always-on beats (decoupled from the optional heartbeat): the live fleet
-  // snapshot Michael reads (~8s) + the breaker/cost-ledger beat (~30s). Guarded so
+  // snapshot the orchestrator reads (~8s) + the breaker/cost-ledger beat (~30s). Guarded so
   // a re-bootstrap (changeHome recovery) can't stack duplicate timers.
   if (fleetTimer) clearInterval(fleetTimer);
   writeFleetSnapshot();
@@ -1592,6 +1725,9 @@ app.whenReady().then(() => {
   // Guarded: a DB failure (e.g. a bad native build) must degrade to defaults,
   // never block app startup.
   try { persist.open(); } catch (e) { console.error('[db] open failed:', e); }
+  // Auto-start collaborative sync when enabled. start() self-gates on a complete
+  // config and lazily imports the optional supabase client; best-effort by design.
+  if (readConfig().syncEnabled) void syncManager.start();
   // Bootstrap the hive (if harnessHome is configured) and start the message router.
   bootstrapHiveServices();
   createWindow();

@@ -7,7 +7,7 @@
 
 import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
-import type { MessageAct } from '@/scene/office/MessageEnvelope';
+import type { MessageAct } from '@/hooks/useHiveMessages';
 import { extractTopics } from './extractTopics';
 
 export interface AgentNode {

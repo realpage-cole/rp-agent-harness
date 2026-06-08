@@ -115,7 +115,6 @@ export function AgentStrip({ config }: AgentStripProps) {
         <AgentCard
           key={a.id}
           name={a.name}
-          character={a.character}
           accent={a.accent}
           status={a.status}
           project={a.project}

@@ -61,7 +61,9 @@ export class MemoryManager {
   private initStarted = false;
   /** True while a mineNow() pass is in flight — serializes palace writers. */
   private mining = false;
-  /** agentId → memory.md mtimeMs at last successful mine (skip unchanged). */
+  /** agentDir (absolute path) → memory.md mtimeMs at last successful mine (skip
+   *  unchanged). Keyed by full path so the own (`agents/<id>`) and mirrored
+   *  (`mirror/agents/<id>`) copies of one agent never collide. */
   private lastMined = new Map<string, number>();
 
   constructor(
@@ -176,30 +178,46 @@ export class MemoryManager {
   /** Mine every agent whose memory changed since last time, one at a time.
    *  The palace permits a single writer, so mines MUST be serialized — firing
    *  them concurrently makes all but one fail with "held by another writer".
-   *  `mining` guards against a slow pass overlapping the next interval tick. */
+   *  `mining` guards against a slow pass overlapping the next interval tick.
+   *
+   *  Two source trees are mined, both serialized under the same `mining` guard:
+   *    - `hive/agents/<id>`        — this machine's OWN agents.
+   *    - `hive/mirror/agents/<id>` — teammates' memory pulled in by SyncManager
+   *      (Phase 2). Mining these makes the whole team recallable locally. Pull
+   *      writes ONLY the mirror tree and push scans ONLY the agents tree, so the
+   *      two are disjoint and can't echo. */
   async mineNow(): Promise<void> {
     const home = this.getHome();
     const bin = this.bin();
     if (!this.active() || !home || !bin) return;
     if (this.mining) return; // a previous pass is still running — let it finish
-    const agentsDir = join(home, 'hive', 'agents');
+    this.mining = true;
+    try {
+      await this.mineTree(join(home, 'hive', 'agents'));
+      await this.mineTree(join(home, 'hive', 'mirror', 'agents'));
+    } finally {
+      this.mining = false;
+    }
+  }
+
+  /** Mine every agent under one source tree whose memory.md changed since the
+   *  last pass, one writer at a time. The caller holds the `mining` guard across
+   *  all trees so the single-writer palace is never contended. The `lastMined`
+   *  mtime cache is keyed by the full agentDir path, so an `agents/<id>` and a
+   *  `mirror/agents/<id>` of the same id never collide. */
+  private async mineTree(agentsDir: string): Promise<void> {
     if (!existsSync(agentsDir)) return;
     let ids: string[];
     try { ids = readdirSync(agentsDir); } catch { return; }
-    this.mining = true;
-    try {
-      for (const id of ids) {
-        const agentDir = join(agentsDir, id);
-        const mem = join(agentDir, 'memory.md');
-        if (!existsSync(mem)) continue;
-        let mtime = 0;
-        try { mtime = statSync(mem).mtimeMs; } catch { continue; }
-        if (this.lastMined.get(id) === mtime) continue; // unchanged — skip the model load
-        this.lastMined.set(id, mtime);
-        await this.mineAgent(agentDir, id); // one writer at a time
-      }
-    } finally {
-      this.mining = false;
+    for (const id of ids) {
+      const agentDir = join(agentsDir, id);
+      const mem = join(agentDir, 'memory.md');
+      if (!existsSync(mem)) continue;
+      let mtime = 0;
+      try { mtime = statSync(mem).mtimeMs; } catch { continue; }
+      if (this.lastMined.get(agentDir) === mtime) continue; // unchanged — skip the model load
+      this.lastMined.set(agentDir, mtime);
+      await this.mineAgent(agentDir, id); // one writer at a time
     }
   }
 
@@ -217,11 +235,11 @@ export class MemoryManager {
       proc.on('close', (code) => {
         if (code !== 0) {
           console.error(`[memory] mine ${id} exited ${code}: ${err.slice(-300)}`);
-          this.lastMined.delete(id); // let the next tick retry
+          this.lastMined.delete(agentDir); // let the next tick retry
         }
         resolve();
       });
-      proc.on('error', () => { this.lastMined.delete(id); resolve(); });
+      proc.on('error', () => { this.lastMined.delete(agentDir); resolve(); });
     });
   }
 

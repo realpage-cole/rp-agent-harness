@@ -12,7 +12,7 @@ const GOD_ID = 'god';
 const GOD_PTY = `pty-${GOD_ID}`;
 
 // How long to let Claude Code's TUI finish booting before we type the first
-// thing into Michael's terminal, and how long to PAUSE after the /remote-control
+// thing into the orchestrator's terminal, and how long to PAUSE after the /remote-control
 // command so the slash command lands + executes on its own line before the
 // orientation prompt follows (otherwise they jam into one line and the TUI shows
 // "Unknown command: /remote-control…").
@@ -23,10 +23,10 @@ const REMOTE_CONTROL_SETTLE_MS = 1500;
 // orientation) and jam the input line.
 const BOOT_GRACE_MS = GOD_BOOT_MS + REMOTE_CONTROL_SETTLE_MS + 2500;
 
-// The first thing Michael (god) is told on a fresh spawn — orient him and put
-// him to work running the floor. Kept terse and action-oriented.
+// The first thing the god (orchestrator) is told on a fresh spawn — orient it
+// and put it to work coordinating the team. Kept terse and action-oriented.
 const INITIAL_GOD_PROMPT = [
-  "You're online as Michael, the orchestrator of the hive. Get oriented, then start running the floor:",
+  "You're online as the orchestrator of the hive. Get oriented, then start coordinating the team:",
   '1. Read your memory.md and drain every message in your inbox.',
   '2. Review board.md + tasks.json and the current roster of agents (active vs archived).',
   '3. Check fleet health: read fleet.json in the hive root for every agent\'s live tokens, cost, status, breaker level, and inbox backlog (`claude agents` will NOT show your hive\'s agents). Flag anyone stalled, over-budget, or breaker-armed.',
@@ -90,7 +90,7 @@ function enrichTaskPrompt(text: string): string {
     `ENRICH TASK: ${text}`,
     '',
     '(Identify the relevant project, cd in, gather READ-ONLY context, then send the improved,',
-    'self-contained prompt to Michael via an outbox message with "to":"god". Do not do the task yourself.)'
+    'self-contained prompt to the orchestrator via an outbox message with "to":"god". Do not do the task yourself.)'
   ].join('\n');
 }
 
@@ -154,7 +154,7 @@ function stationForTool(tool: string): { station: StationKind; carry?: ToolKind 
 
 /**
  * The renderer-side glue for the hive:
- *   1. spawns the god agent into Michael's room when none is running,
+ *   1. spawns the god (orchestrator) agent when none is running,
  *   2. drives avatar state from real Claude Code hook events, and
  *   3. wakes idle agents that have unread inbox messages so collaboration
  *      doesn't stall while an agent sits at its prompt.
@@ -170,14 +170,14 @@ export function useHive(config: HarnessConfig | null): void {
   // type into it). One message per cooldown keeps delivery strictly one-by-one.
   const lastFlush = useRef<Record<string, number>>({});
   // In-flight spawn guard so a re-render / StrictMode double-mount can't spawn
-  // Michael twice (the window between the listPtys check and spawnPty is racy).
+  // the orchestrator twice (the window between the listPtys check and spawnPty is racy).
   const godSpawning = useRef(false);
   // Per-agent timestamp until which auto-typers (inbox-wake #3, queue-drain #4)
   // must leave the agent alone — set while its boot sequence is typing so nothing
   // collides with /remote-control + the orientation prompt.
   const bootGraceUntil = useRef<Record<string, number>>({});
   const seenTerminalHandoffs = useRef<Set<string>>(new Set());
-  // Reactive so the assistant bootstrap (effect #1b) re-runs once Michael is ready.
+  // Reactive so the assistant bootstrap (effect #1b) re-runs once the orchestrator is ready.
   const godStatus = useStore((s) => s.godStatus);
   // #5C/#7C.4 — latest circuit-breaker level per agent. When 'constrained'/
   // 'stopped' the avatar is pinned to 'looping' and hook events must NOT flip it
@@ -212,21 +212,20 @@ export function useHive(config: HarnessConfig | null): void {
         args,
         cols: 100,
         rows: 30,
-        hive: { id: GOD_ID, name: 'Michael', provider: 'claude', cwd: config.harnessHome!, isGod: true, role: 'orchestrator (god)' }
+        hive: { id: GOD_ID, name: 'Orchestrator', provider: 'claude', cwd: config.harnessHome!, isGod: true, role: 'orchestrator (god)' }
       });
       if (cancelled) { godSpawning.current = false; return; }
       if (!res.ok) { godSpawning.current = false; useStore.getState().setGodStatus('failed'); return; }
       const god: Agent = {
         id: GOD_ID,
-        name: 'Michael',
-        character: 'michael',
+        name: 'Orchestrator',
         accent: 'lemon',
-        description: 'god — runs the floor, triages requests, escalates only critical calls to you',
+        description: 'god — coordinates the team, triages requests, escalates only critical calls to you',
         project: 'hive',
         tmuxTarget: '',
         cwd: config.harnessHome!,
         status: 'idle',
-        action: 'running the floor',
+        action: 'coordinating the team',
         progress: 0,
         currentStation: 'desk',
         ptyId: GOD_PTY,
@@ -239,13 +238,13 @@ export function useHive(config: HarnessConfig | null): void {
       useStore.getState().addAgent(god);
       useStore.getState().setGodStatus('ready');
 
-      // Fresh spawn → kick Michael off once his TUI is up. First enable remote
-      // control so the human can approve permission prompts from their phone
-      // (best-effort — a failed/unknown slash command just prints to his terminal
-      // and is harmless), PAUSE so it lands on its own line, then hand him the
+      // Fresh spawn → kick the orchestrator off once its TUI is up. First enable
+      // remote control so the human can approve permission prompts from their phone
+      // (best-effort — a failed/unknown slash command just prints to its terminal
+      // and is harmless), PAUSE so it lands on its own line, then hand it the
       // orientation prompt. Both go through the per-pty submit chain, so they're
       // strictly sequential and can't jam together; the boot-grace window keeps
-      // the inbox-wake/drain loops off Michael until he's oriented. Restored
+      // the inbox-wake/drain loops off the orchestrator until it's oriented. Restored
       // sessions (the live-PTY branch above) skip this.
       bootGraceUntil.current[GOD_ID] = Date.now() + BOOT_GRACE_MS;
       timers.push(setTimeout(() => {
@@ -271,7 +270,7 @@ export function useHive(config: HarnessConfig | null): void {
       const blevel = breakerLevel.current[e.agentId];
       const breakerArmed = blevel === 'constrained' || blevel === 'stopped';
       // Hook events are the authoritative status source for real agents (the
-      // pty-stream parser only refines the on-floor action/station).
+      // pty-stream parser only refines the action/station).
       if (e.event === 'PreCompact') {
         // #5C — agent entered /compact; show it's boxing up context, not frozen.
         if (!breakerArmed) updateAgent(e.agentId, { status: 'compacting', action: 'compacting context', carrying: undefined });
@@ -309,9 +308,9 @@ export function useHive(config: HarnessConfig | null): void {
         //   1. it genuinely needs the human (a permission / approval prompt), or
         //   2. the prompt has merely gone idle ("Claude is waiting for your
         //      input") — i.e. the agent answered and has nothing queued.
-        // Only (1) is a real "needs you". Treating (2) as blocked made Michael
-        // march to the door with a red "!" right after finishing, so detect the
-        // idle case and let him linger on the floor instead.
+        // Only (1) is a real "needs you". Treating (2) as blocked falsely flagged
+        // the orchestrator right after finishing, so detect the idle case and
+        // leave its status as idle instead.
         const msg = (e.message ?? '').toLowerCase();
         const idleWaiting = !msg
           || msg.includes('waiting for your input')
@@ -544,12 +543,12 @@ export function useHive(config: HarnessConfig | null): void {
     return () => { unsub(); if (debounce) clearTimeout(debounce); clearInterval(iv); };
   }, [config?.onboardingComplete]);
 
-  // 5) Pipe inbound Slack messages into Michael's queue. The main-process Slack
-  //    webhook server pushes each verified message here via IPC; enqueueing to
-  //    GOD_ID lands it in Michael's queue exactly as if the user had typed it
-  //    into the composer — effect #4 above then drains it to his PTY.
+  // 5) Pipe inbound Slack messages into the orchestrator's queue. The main-process
+  //    Slack webhook server pushes each verified message here via IPC; enqueueing to
+  //    GOD_ID lands it in the orchestrator's queue exactly as if the user had typed it
+  //    into the composer — effect #4 above then drains it to its PTY.
   //    We immediately ack in the triggering thread and stash the thread coords
-  //    so the office can post its summary back later.
+  //    so the hive can post its summary back later.
   useEffect(() => {
     if (!config?.onboardingComplete) return;
     return window.cth.onSlackMessage((msg) => {
@@ -562,7 +561,7 @@ export function useHive(config: HarnessConfig | null): void {
       void window.cth.slackReply({
         channel: msg.channel,
         thread_ts: msg.thread_ts,
-        text: 'Your request is queued Munder Difflin office employees will start working shortly.'
+        text: 'Your request is queued — the Hive team will start working shortly.'
       });
     });
   }, [config?.onboardingComplete]);

@@ -1,11 +1,20 @@
 import { PixelPanel } from '@/components/PixelPanel';
 
+export interface BootSplashProps {
+  /** Headline above the loader (e.g. the panel title). */
+  title?: string;
+  /** Body copy under the spinner. */
+  message?: string;
+}
+
 /**
- * Loader shown on the empty floor while the god agent ("Michael") is clocking
- * in on launch. Replaces the "add agent" prompt so a returning user doesn't see
- * the empty-floor call-to-action before Michael has booted.
+ * Neutral "Starting…" loader shown while the orchestrator agent is coming up on
+ * launch. No persona framing.
  */
-export function MichaelBooting() {
+export function BootSplash({
+  title = 'STARTING',
+  message = 'Bringing the orchestrator online and getting the team ready. Hang tight…'
+}: BootSplashProps) {
   return (
     <div style={{
       position: 'absolute', inset: 0,
@@ -13,22 +22,21 @@ export function MichaelBooting() {
       pointerEvents: 'none'
     }}>
       <div style={{ pointerEvents: 'auto', width: 360 }}>
-        <PixelPanel variant="dialog" title="CLOCKING IN" noPadding>
+        <PixelPanel variant="dialog" title={title} noPadding>
           <div style={{
             padding: 20,
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14
           }}>
-            {/* Stepped pixel blocks — staggered blink, no easing (matches aesthetic) */}
             <div style={{ display: 'flex', gap: 6 }}>
               {[0, 1, 2, 3].map((i) => (
                 <span
                   key={i}
                   style={{
-                    width: 14, height: 14,
-                    background: '#6E1423',
-                    boxShadow: 'var(--cth-shadow-hard)',
-                    animation: 'cth-blink 1s steps(1, end) infinite',
-                    animationDelay: `${i * 0.2}s`
+                    width: 12, height: 12,
+                    borderRadius: '50%',
+                    background: 'var(--cth-sky)',
+                    animation: 'cth-blink 1s ease-in-out infinite',
+                    animationDelay: `${i * 0.15}s`
                   }}
                 />
               ))}
@@ -37,8 +45,7 @@ export function MichaelBooting() {
               margin: 0, fontSize: 14, lineHeight: '20px', textAlign: 'center',
               color: 'var(--cth-ink-700)'
             }}>
-              Michael is settling into the corner office and getting the floor
-              ready. Hang tight…
+              {message}
             </p>
           </div>
         </PixelPanel>

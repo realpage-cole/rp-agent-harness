@@ -13,7 +13,7 @@ export interface HiveAgentMeta {
   capabilities?: string[];
   cwd: string;
   isGod?: boolean;
-  /** Michael's prep assistant — send-only; enriches prompts and forwards them. */
+  /** The orchestrator's prep assistant — send-only; enriches prompts and forwards them. */
   isAssistant?: boolean;
 }
 
@@ -70,8 +70,8 @@ export interface HiveTask {
 }
 
 /** A message the router just delivered, with its resolved recipient ids. Drives
- *  the envelope-handoff animation on the office floor. `needsHuman` is set when
- *  the sender aimed at "human" (now routed to the god proxy) — cosmetic tint
+ *  the dashboard's reflection of the handoff. `needsHuman` is set when
+ *  the sender aimed at "human" (now routed to the god proxy) — cosmetic highlight
  *  only; there is no approval queue. */
 export interface HiveRouteEvent {
   id: string;
@@ -162,6 +162,10 @@ export interface HarnessConfig {
   webhookEnabled?: boolean;
   webhookSecret?: string;
   webhookPort?: number;
+  syncEnabled?: boolean;
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
+  syncWorkspaceId?: string;
   costCapUsd?: number;
   costCapTokens?: number;
   agentTokenCaps?: Record<string, number>;
@@ -300,6 +304,23 @@ export interface CIRun {
   status: string;
   conclusion: string | null;
   url: string;
+}
+
+/** Snapshot of the Supabase sync subsystem (mirrors src/main/sync/types.ts). */
+export interface SyncStatus {
+  enabled: boolean;
+  configured: boolean;
+  running: boolean;
+  lastPushAt: number | null;
+  lastError: string | null;
+  pushed: { log: number; cost: number; history: number };
+  memory: { pushed: number; pulled: number };
+  /** Phase 3 shared state: rows pushed up / remote rows applied locally. */
+  state: { pushed: number; applied: number };
+  /** Phase 4 auth state — the ONLY auth info the renderer ever sees. Deliberately
+   *  tokenless: the renderer learns *that* a user is signed in (and who), never
+   *  the session tokens (those live MAIN-side in the store kv). */
+  auth: { signedIn: boolean; userId: string | null; email: string | null };
 }
 
 const api = {
@@ -601,7 +622,7 @@ const api = {
   hiveSetArchived: (id: string, archived: boolean): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('hive:setArchived', id, archived),
 
-  // ─── Slack integration (Slack message → Michael's queue) ─────────────────────
+  // ─── Slack integration (Slack message → the orchestrator's queue) ────────────
   /** Register a listener for inbound Slack messages; returns an unsubscribe fn.
    *  The message carries the thread coordinates needed to reply in-thread. */
   onSlackMessage: (cb: (msg: { text: string; channel: string; ts: string; thread_ts: string }) => void): (() => void) => {
@@ -652,7 +673,49 @@ const api = {
   webhookSetConfig: (patch: {
     secret?: string; port?: number; enabled?: boolean;
   }): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('webhook:setConfig', patch)
+    ipcRenderer.invoke('webhook:setConfig', patch),
+
+  // ─── Supabase collaborative sync (append-only mirror + agent-memory sync) ─────
+  /** Bring sync up (lazy-imports the client; gated on enabled + configured). */
+  syncStart: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sync:start'),
+  /** Tear sync down (idempotent). */
+  syncStop: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('sync:stop'),
+  /** Snapshot for the Settings badge: enabled/configured/running + push/memory counters. */
+  syncStatus: (): Promise<SyncStatus> =>
+    ipcRenderer.invoke('sync:status'),
+  /** Persist sync settings; (re)starts when fully configured + enabled, else stops. */
+  syncSetConfig: (patch: {
+    syncEnabled?: boolean; supabaseUrl?: string; supabaseAnonKey?: string; syncWorkspaceId?: string;
+  }): Promise<{ ok: boolean; error?: string; running?: boolean }> =>
+    ipcRenderer.invoke('sync:setConfig', patch),
+  /** Phase 4 — sign in to Supabase Auth (email/password). The session (tokens)
+   *  stays MAIN-side; this returns ONLY {ok,error?}. The renderer learns auth
+   *  state via the `auth` field on syncStatus / the sync:event broadcast. */
+  syncSignIn: (email: string, password: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sync:signIn', email, password),
+  /** Sign out: clears the MAIN-side session + stops the loops. */
+  syncSignOut: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('sync:signOut'),
+  /** Create a workspace (name) and adopt its id as the sync workspace. The
+   *  workspaces + workspace_members DB rows are written MAIN-side by SyncManager
+   *  (auth.ensureWorkspace, signed-in client). Returns ONLY {ok, id?, error?} —
+   *  NEVER tokens. */
+  syncCreateWorkspace: (opts: { name: string }): Promise<{ ok: boolean; id?: string; error?: string }> =>
+    ipcRenderer.invoke('sync:createWorkspace', opts),
+  /** Join an existing workspace by id (writes this user's workspace_members row
+   *  MAIN-side) and adopt it as the sync workspace. Returns ONLY {ok, id?, error?}
+   *  — NEVER tokens. */
+  syncJoinWorkspace: (opts: { id: string }): Promise<{ ok: boolean; id?: string; error?: string }> =>
+    ipcRenderer.invoke('sync:joinWorkspace', opts),
+  /** Subscribe to sync status pushes (emitted when a pull lands new memory);
+   *  returns an unsubscribe fn. */
+  onSyncEvent: (cb: (s: SyncStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: SyncStatus) => cb(payload);
+    ipcRenderer.on('sync:event', listener);
+    return () => ipcRenderer.removeListener('sync:event', listener);
+  }
 };
 
 contextBridge.exposeInMainWorld('cth', api);

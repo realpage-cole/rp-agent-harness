@@ -5,7 +5,7 @@ import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { disposeTerminal } from './terminalPool';
 import { Icon } from './Icon';
-import { SpritePortrait } from './SpritePortrait';
+import { Avatar } from './Avatar';
 import { useStore, type Agent } from '@/store/store';
 import { usePtyParser } from '@/hooks/usePtyParser';
 
@@ -41,7 +41,7 @@ export function FullscreenTerminal() {
 
   const onKill = async () => {
     if (!agent.ptyId) return;
-    if (!confirm(`Close ${agent.name}? The PTY process will terminate and the agent is archived (kept in history, off the floor).`)) return;
+    if (!confirm(`Close ${agent.name}? The PTY process will terminate and the agent is archived (kept in history, removed from the roster).`)) return;
     await window.cth.killPty(agent.ptyId);
     disposeTerminal(agent.ptyId);
     archiveAgent(agent.id);
@@ -72,7 +72,7 @@ export function FullscreenTerminal() {
         <span style={{
           fontFamily: 'var(--cth-font-display)', fontSize: 12, lineHeight: '20px',
           color: 'var(--cth-ink-900)'
-        }}>MUNDER DIFFLIN · FULLSCREEN</span>
+        }}>HIVE · FULLSCREEN</span>
       </div>
 
       {/* Tabs */}
@@ -176,15 +176,7 @@ function Tab({ agent, active, onClick }: { agent: Agent; active: boolean; onClic
         whiteSpace: 'nowrap'
       }}
     >
-      <div style={{
-        width: 20, height: 32,
-        background: `var(--cth-${agent.accent}-light)`,
-        boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-        overflow: 'hidden'
-      }}>
-        <SpritePortrait character={agent.character} scale={1} />
-      </div>
+      <Avatar name={agent.name} accent={agent.accent} size={24} />
       <span style={{
         overflow: 'hidden', textOverflow: 'ellipsis',
         fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px'

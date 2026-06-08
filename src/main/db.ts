@@ -153,6 +153,18 @@ export class PersistStore {
     return rows as CommandHistoryRow[];
   }
 
+  /** Ascending-by-id history with id strictly greater than `afterId`, for the
+   *  one-way sync cursor (SyncManager). Oldest-first so the caller advances its
+   *  cursor to the last returned row's id. */
+  historySince(afterId: number, limit = 500): CommandHistoryRow[] {
+    if (!this.db) return [];
+    const lim = clampLimit(limit, 500);
+    const after = Number.isFinite(afterId) ? Math.floor(afterId) : 0;
+    return this.db.prepare(
+      'SELECT id, agent_id AS agentId, cwd, text, ts FROM command_history WHERE id > ? ORDER BY id ASC LIMIT ?'
+    ).all(after, lim) as CommandHistoryRow[];
+  }
+
   /** Substring search over prompt text, most-recent-first. */
   searchHistory(query: string, limit = 50): CommandHistoryRow[] {
     if (!this.db) return [];

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '@/store/store';
 import { PixelBadge } from './PixelBadge';
 import { Icon } from './Icon';
-import type { MessageAct } from '@/scene/office/MessageEnvelope';
+import type { MessageAct } from '@/hooks/useHiveMessages';
 import {
   buildGraph,
   type GraphData,

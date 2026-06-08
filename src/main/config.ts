@@ -60,11 +60,11 @@ export const OPS_STANDUP_MISSION: ScheduledMission = {
  *  when an agent looks stuck and a slower one right after a re-engage. */
 export const HEARTBEAT_MISSION: ScheduledMission = {
   id: 'heartbeat',
-  label: 'Floor heartbeat',
+  label: 'Idle heartbeat',
   intervalMs: 120_000,
   to: 'god',
   body:
-    'Floor heartbeat: the team has gone quiet. Review the digest in your inbox, ' +
+    'Idle heartbeat: the team has gone quiet. Review the digest in your inbox, ' +
     're-engage anyone stalled or blocked, and keep the board accurate — or rest ' +
     'if the work is genuinely done.',
   enabled: false,
@@ -142,7 +142,7 @@ export interface HarnessConfig {
    *  ("theme" key) at spawn so the TUI's truecolor palette matches. Scoped to
    *  harness agents only; the user's global Claude theme is never touched. */
   terminalTheme?: 'light' | 'dark';
-  /** Master toggle for the Slack → Michael's-queue integration. */
+  /** Master toggle for the Slack → orchestrator's-queue integration. */
   slackEnabled?: boolean;
   /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */
   slackSigningSecret?: string;
@@ -161,6 +161,19 @@ export interface HarnessConfig {
   webhookSecret?: string;
   /** Local HTTP port the generic webhook server binds to (default 3849). */
   webhookPort?: number;
+
+  // ─── Supabase collaborative sync (Phase 0/1: append-only mirror) ───────────
+  /** Master toggle for Supabase sync. Off by default — the app is fully local
+   *  and offline-capable until the user turns this on. */
+  syncEnabled?: boolean;
+  /** Supabase project URL, e.g. https://xxxx.supabase.co. */
+  supabaseUrl?: string;
+  /** Supabase anon/publishable key. Safe to keep client-side; RLS is the real
+   *  guard (PROTOTYPE: see supabase/migrations/0001 — tighten in Phase 4). */
+  supabaseAnonKey?: string;
+  /** Shared team id stamped on every synced row. Phase 4 turns this into a real
+   *  auth-scoped `workspaces` row; for now it's a shared opaque string. */
+  syncWorkspaceId?: string;
 
   // ─── Memory reflection (the janitor's condense half) ───────────────────────
   /** Master toggle for the in-process MemoryReflector. Default on. */
@@ -197,6 +210,10 @@ const DEFAULTS: HarnessConfig = {
   webhookEnabled: false,
   webhookSecret: undefined,
   webhookPort: undefined,
+  syncEnabled: false,
+  supabaseUrl: undefined,
+  supabaseAnonKey: undefined,
+  syncWorkspaceId: undefined,
   // Memory reflection — preventive; nobody is over threshold today, so it sits
   // dark until an agent's memory crosses one of these (the verify gate is the
   // safety for the LLM step). Thresholds DECIDED by god 2026-06-06.

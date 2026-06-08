@@ -5,7 +5,7 @@
  * Modeled on `SlackWebhookServer` (same zero-SDK `node:http` + `tunnelmole`
  * approach) but for arbitrary callers rather than Slack's Events API:
  *   - POST <endpoint>  + `x-md-webhook-secret: <secret>` + JSON `{ message, title? }`
- *       → routes the message to god/Michael, creates a stamped kanban card, and
+ *       → routes the message to god/the orchestrator, creates a stamped kanban card, and
  *         returns a freshly-minted capability TOKEN: `{ ok, token, taskId }`.
  *   - GET  <endpoint>  + `x-md-webhook-token: <token>` (or `?token=`)
  *       → returns ONLY that token's task status: `{ ok, status, title, result? }`.

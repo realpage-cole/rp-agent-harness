@@ -1,5 +1,5 @@
 appId: in.munderdiffl.app
-productName: Munder Difflin
+productName: Hive
 copyright: Copyright © 2026 Chaitanya Giri
 
 # Notarize + staple after signing, but only when APPLE_* creds are in the env
@@ -41,11 +41,11 @@ mac:
   # the privacy prompt and, for a signed app, remembers the grant — so the user
   # is asked ONCE instead of on every agent action.
   extendInfo:
-    NSDocumentsFolderUsageDescription: "Munder Difflin runs your Claude Code agents, which read and write files in the project folders you point them at."
-    NSDesktopFolderUsageDescription: "Munder Difflin's agents may work on projects located on your Desktop."
-    NSDownloadsFolderUsageDescription: "Munder Difflin's agents may work on projects located in your Downloads."
-    NSRemovableVolumesUsageDescription: "Munder Difflin's agents may work on projects located on external volumes."
-    NSNetworkVolumesUsageDescription: "Munder Difflin's agents may work on projects located on network volumes."
+    NSDocumentsFolderUsageDescription: "Hive runs your Claude Code agents, which read and write files in the project folders you point them at."
+    NSDesktopFolderUsageDescription: "Hive's agents may work on projects located on your Desktop."
+    NSDownloadsFolderUsageDescription: "Hive's agents may work on projects located in your Downloads."
+    NSRemovableVolumesUsageDescription: "Hive's agents may work on projects located on external volumes."
+    NSNetworkVolumesUsageDescription: "Hive's agents may work on projects located on network volumes."
   # Hardened runtime + entitlements so the spawned `claude` agents inherit this
   # app's TCC responsibility (one grant covers them all) and node-pty can load.
   hardenedRuntime: true
@@ -71,10 +71,10 @@ mac:
   target:
     - target: dmg
       arch: [universal]
-  artifactName: Munder-Difflin-${version}-mac-${arch}.dmg
+  artifactName: Hive-${version}-mac-${arch}.dmg
 
 dmg:
-  title: Munder Difflin ${version}
+  title: Hive ${version}
 
 # ---- Windows ----
 win:
@@ -89,11 +89,11 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  artifactName: Munder-Difflin-${version}-win-x64-setup.exe
-  shortcutName: Munder Difflin
+  artifactName: Hive-${version}-win-x64-setup.exe
+  shortcutName: Hive
 
 portable:
-  artifactName: Munder-Difflin-${version}-win-x64-portable.exe
+  artifactName: Hive-${version}-win-x64-portable.exe
 
 # ---- Linux ----
 linux:
@@ -102,4 +102,4 @@ linux:
   target:
     - target: AppImage
       arch: [x64]
-  artifactName: Munder-Difflin-${version}-linux-x86_64.AppImage
+  artifactName: Hive-${version}-linux-x86_64.AppImage

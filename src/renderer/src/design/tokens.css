@@ -1,38 +1,40 @@
 /* Design tokens — mirrors tokens.ts. Update both together. */
 :root {
-  /* Base */
-  --cth-cream-50:  #FFFDF5;
-  --cth-cream-100: #FFF8E7;
-  --cth-cream-200: #F4E9C7;
-  --cth-cream-300: #E8D9A0;
-  --cth-paper-100: #FCFAF0;
-  --cth-paper-200: #F0EAD2;
+  /* Base — neutral surfaces / elevation (light, calm). Names kept; values modern.
+     The cream-* / paper-* names now map onto a clean neutral surface scale. */
+  --cth-cream-50:  #FFFFFF; /* highest surface / page */
+  --cth-cream-100: #FAFAFA; /* app background */
+  --cth-cream-200: #F1F2F4; /* subtle fill / track */
+  --cth-cream-300: #E4E6EA; /* hairline / divider */
+  --cth-paper-100: #FFFFFF; /* card surface */
+  --cth-paper-200: #F6F7F9; /* inset surface */
 
-  /* Ink */
-  --cth-ink-900: #1A1320;
-  --cth-ink-700: #3D2E4A;
-  --cth-ink-500: #6B5878;
-  --cth-ink-300: #A899B5;
-  --cth-ink-100: #D9CFE0;
+  /* Ink — neutral text/border ramp (was purple-ink; now slate-neutral) */
+  --cth-ink-900: #1B1F24; /* primary text */
+  --cth-ink-700: #3A4048; /* strong text / icon */
+  --cth-ink-500: #6B727B; /* secondary text */
+  --cth-ink-300: #AAB1BA; /* muted / placeholder */
+  --cth-ink-100: #DCE0E5; /* soft border */
 
-  /* Accents */
-  --cth-coral: #FF6B6B;       --cth-coral-light: #FFB4B4;
-  --cth-mint:  #6BCF7F;       --cth-mint-light:  #B4E5BD;
-  --cth-sky:   #4ECDC4;       --cth-sky-light:   #A8E6E0;
-  --cth-lemon: #FFD93D;       --cth-lemon-light: #FFEC99;
-  --cth-lilac: #B197FC;       --cth-lilac-light: #D6C5FF;
-  --cth-peach: #FFA07A;       --cth-peach-light: #FFD0B5;
+  /* Accents — one primary accent (indigo) + a balanced supporting set.
+     Kept all six names; coral is no longer the brand, the accent is indigo-ish. */
+  --cth-coral: #6366F1;       --cth-coral-light: #C7D2FE; /* primary accent */
+  --cth-mint:  #10B981;       --cth-mint-light:  #A7F3D0;
+  --cth-sky:   #0EA5E9;       --cth-sky-light:   #BAE6FD;
+  --cth-lemon: #F59E0B;       --cth-lemon-light: #FDE68A;
+  --cth-lilac: #8B5CF6;       --cth-lilac-light: #DDD6FE;
+  --cth-peach: #F97316;       --cth-peach-light: #FED7AA;
 
-  /* Status */
-  --cth-status-idle:     #A899B5;
-  --cth-status-thinking: #4ECDC4;
-  --cth-status-working:  #FFD93D;
-  --cth-status-waiting:  #6C8EF5;
-  --cth-status-blocked:  #FF6B6B;
-  --cth-status-success:  #6BCF7F;
-  --cth-status-ghost:    #D9CFE0;
-  --cth-status-compacting: #9B7EDE; /* #5C — mid-/compact, "boxing up context" */
-  --cth-status-looping:    #FF9F43; /* #5C — circuit-breaker armed (runaway) */
+  /* Status — semantics + intent preserved (idle/working/blocked/etc.) */
+  --cth-status-idle:     #AAB1BA;
+  --cth-status-thinking: #0EA5E9;
+  --cth-status-working:  #F59E0B;
+  --cth-status-waiting:  #6366F1;
+  --cth-status-blocked:  #EF4444;
+  --cth-status-success:  #10B981;
+  --cth-status-ghost:    #DCE0E5;
+  --cth-status-compacting: #8B5CF6; /* mid-/compact, "boxing up context" */
+  --cth-status-looping:    #F97316; /* circuit-breaker armed (runaway) */
 
   /* Spacing */
   --cth-space-0: 0px;
@@ -45,48 +47,41 @@
   --cth-space-7: 48px;
   --cth-space-8: 64px;
 
-  /* Type */
-  --cth-font-display: "Press Start 2P", monospace;
-  --cth-font-ui:      "Pixelify Sans", system-ui, sans-serif;
-  --cth-font-mono:    "VT323", "JetBrains Mono", monospace;
+  /* Type — system / Inter UI stack + JetBrains Mono mono */
+  --cth-font-display: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cth-font-ui:      "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cth-font-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Type scale */
-  --cth-text-display-lg: 16px;
-  --cth-text-display-md: 12px;
-  --cth-text-display-sm: 8px;
-  --cth-text-body-lg:    18px;
-  --cth-text-body-md:    16px;
-  --cth-text-body-sm:    14px;
-  --cth-text-mono-md:    16px;
-  --cth-text-mono-sm:    14px;
+  /* Type scale — modern legible sizes (display is no longer a tiny pixel face) */
+  --cth-text-display-lg: 22px;
+  --cth-text-display-md: 16px;
+  --cth-text-display-sm: 12px;
+  --cth-text-body-lg:    16px;
+  --cth-text-body-md:    14px;
+  --cth-text-body-sm:    13px;
+  --cth-text-mono-md:    13px;
+  --cth-text-mono-sm:    12px;
 
-  /* Line heights — integer multiples */
-  --cth-lh-display-lg: 24px;
-  --cth-lh-display-md: 20px;
-  --cth-lh-display-sm: 12px;
+  /* Line heights */
+  --cth-lh-display-lg: 28px;
+  --cth-lh-display-md: 22px;
+  --cth-lh-display-sm: 16px;
   --cth-lh-body-lg:    24px;
   --cth-lh-body-md:    20px;
   --cth-lh-body-sm:    18px;
   --cth-lh-mono:       20px;
 
-  /* Hard drop shadow — no blur */
-  --cth-shadow-hard: 4px 4px 0 rgba(26, 19, 32, 0.25);
+  /* Soft elevation shadow — subtle blur, replaces the hard no-blur offset */
+  --cth-shadow-hard: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.06);
 
-  /* Panel border package — three layers via box-shadow inset */
+  /* Panel border package — soft 1px hairline borders (kept the three names/APIs).
+     The multi-layer "chunky" insets become a single clean 1px border. */
   --cth-panel-border:
-    inset 0 0 0 1px var(--cth-ink-700),
-    inset 0 0 0 3px var(--cth-cream-200),
-    inset 0 0 0 5px var(--cth-ink-900);
+    inset 0 0 0 1px var(--cth-ink-100);
   --cth-panel-border-inset:
-    inset 0 0 0 1px var(--cth-ink-500),
-    inset 0 0 0 3px var(--cth-cream-100),
-    inset 0 0 0 5px var(--cth-ink-700);
+    inset 0 0 0 1px var(--cth-cream-300);
   --cth-panel-border-terminal:
-    inset 0 0 0 1px var(--cth-ink-500),
-    inset 0 0 0 3px var(--cth-ink-700),
-    inset 0 0 0 5px var(--cth-ink-900);
+    inset 0 0 0 1px var(--cth-ink-700);
   --cth-panel-border-dialog:
-    inset 0 0 0 1px var(--cth-ink-700),
-    inset 0 0 0 3px var(--cth-cream-200),
-    inset 0 0 0 5px var(--cth-ink-900);
+    inset 0 0 0 1px var(--cth-ink-100);
 }
