@@ -8,14 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [0.2.3] — 2026-06-09
 
-A multi-provider release: the floor is no longer Claude-only. Antigravity (Gemini)
+A multi-provider release: the harness is no longer Claude-only. Antigravity (Gemini)
 and Codex agents become first-class hive participants, schedules get their own tab,
 and the Slack / webhook ingress is moved off the flaky public tunnel.
 
 ### Added
 - **First-class Antigravity (Gemini / `agy`) provider.** A worker can now run the Antigravity CLI as a full hive participant. Because `agy` has no Claude-style `--append-system-prompt`/`--settings` hooks, the hive identity + protocol ride in as the session's initial prompt, and a native `agy-hook` bridge normalizes Antigravity's lifecycle events into the existing hook pipeline so a Gemini worker gets the same live status + inbox-drain as Claude — on the subscription, no API key. (#54)
-- **Schedules tab.** Recurring auto-dispatched missions (and the adaptive heartbeat) get their own Command-Center tab instead of an inline section. (#50)
-- **Terminal work-order handoff for hookless providers.** A provider with no inbox-drain path now receives hive mail as a `WORK ORDER FROM HIVE` typed into its terminal, falling back to a god-bounce only if the renderer is unavailable. (#53)
+- **Schedules tab.** Recurring auto-dispatched missions (and the adaptive heartbeat) get their own dashboard tab instead of an inline section. (#50)
+- **Terminal work-order handoff for hookless providers.** A provider with no inbox-drain path now receives hive mail as a `WORK ORDER FROM HIVE` typed into its terminal, falling back to an orchestrator bounce only if the renderer is unavailable. (#53)
 
 ### Fixed
 - **Codex agents now follow the hive protocol and message back.** Codex spawned without the hive protocol or any hook, so it never read its inbox or wrote its outbox. Codex is now a non-hive-aware-but-inbox-capable provider: the protocol is injected as its initial (positional) prompt, its outbox is drained provider-agnostically by the router, and inbox mail reaches it via the renderer's idle inbox-wake nudge. Codex and Antigravity coexist in the provider union. (#47, #54)
@@ -25,19 +25,19 @@ and the Slack / webhook ingress is moved off the flaky public tunnel.
 
 A community polish release — almost entirely the work of @Gulum: a live context-window
 gauge on every agent card, sharper terminals, correct Windows metering, and dispatch that
-always routes through the god.
+always routes through the orchestrator.
 
 ### Added
 - **Live context-window gauge on each agent card.** A Claude Code statusLine pushes the session's exact token count and real context-window size after every response, so each agent card shows a precise live fuel gauge drawn from Claude Code itself instead of a transcript estimate. The gauge also zeroes the instant you send `/clear`, rather than briefly showing the previous session's full bar until the next response. (Thanks @Gulum — #12, closes #11.)
 - **Per-session terminal theme toggle + Unicode 11 emoji widths.** Each terminal session can now switch its Claude theme independently, and emoji column widths follow Unicode 11 so wide glyphs stop nudging the cursor out of alignment. (The WebGL renderer, copy/paste, and `minimumContrastRatio` from v0.2.0 are kept as-is.) (Thanks @Gulum — #26.)
-- **All human dispatch flows through the god.** Every Command Center dispatch now mails the god (`Task from the human`) instead of writing straight into a worker's inbox; the worker dropdown becomes a **suggested owner** (Michael still decides), so nothing skips the orchestrator. (Thanks @Gulum — #45, fixes #44.)
-- **Dedicated context-window row on the monitor tab.** The Floor monitor's cumulative budget bar was being misread as a per-agent context gauge; a separate `ctx` context-window row now sits alongside it, so the live context window and the cumulative budget aren't confused. (Thanks @Gulum — #46.)
+- **All human dispatch flows through the orchestrator.** Every dashboard dispatch now mails the god agent (`Task from the human`) instead of writing straight into a worker's inbox; the worker dropdown becomes a **suggested owner** (the orchestrator still decides), so nothing skips the orchestrator. (Thanks @Gulum — #45, fixes #44.)
+- **Dedicated context-window row on the monitor tab.** The fleet monitor's cumulative budget bar was being misread as a per-agent context gauge; a separate `ctx` context-window row now sits alongside it, so the live context window and the cumulative budget aren't confused. (Thanks @Gulum — #46.)
 
 ### Fixed
 - **Windows usage meter no longer reads 0/0.** The transcript reconciler built the per-project directory name with the POSIX rule, but Claude Code on Windows encodes *every* non-alphanumeric character (including the drive colon), so the meter never found the transcript and always read 0 tokens / $0.00. (Thanks @Gulum — #34, fixes #10.)
-- **Send-only assistant mail no longer black-holes.** Direct mail to the send-only prep assistant landed in an inbox nothing reads; the router now bounces it to the god (subject prefixed `[bounced …]`) instead of dropping it. (Thanks @Gulum — #33, fixes #32.)
+- **Send-only assistant mail no longer black-holes.** Direct mail to the send-only prep assistant landed in an inbox nothing reads; the router now bounces it to the orchestrator (subject prefixed `[bounced …]`) instead of dropping it. (Thanks @Gulum — #33, fixes #32.)
 - **Boot banner no longer stacks in scrollback.** `tryFit()` fired `resizePty` on every fit even when the dimensions were unchanged; redundant resizes are now skipped, so the boot banner stops re-stacking in the terminal history. (Thanks @Gulum — #8.)
-- **Visible text-select cursor on the cream theme.** The hovering I-beam (an OS cursor that CSS color hints can't touch, drawn white by several Windows schemes) is now an inked I-beam with a halo, so it stays visible over the light terminal. (Thanks @Gulum — #39.)
+- **Visible text-select cursor on the light theme.** The hovering I-beam (an OS cursor that CSS color hints can't touch, drawn white by several Windows schemes) is now an inked I-beam with a halo, so it stays visible over the light terminal. (Thanks @Gulum — #39.)
 
 ### Acknowledgements
 This release is almost entirely the work of @Gulum — thank you. Maintained by @chaitanyagiri.
@@ -48,18 +48,18 @@ A small follow-up to v0.2.0 that makes the scheduler considerate of agents that 
 
 ### Changed
 - **Scheduled auto-compaction is queued, not forced.** The hourly ops-standup's terminal compaction is now enqueued per agent and delivered only when that agent is idle (deduped — at most one `/compact` pending at a time), so it compacts *between* steps instead of jamming a working terminal mid-step. The standup prompt now asks each agent to summarise its current task and next step, then resume from the same point after compacting.
-- **Heartbeat is inbox-driven.** The floor heartbeat (`reengageGod`) no longer types directly into Michael's terminal; it drops its digest in his inbox, which the busy-aware inbox-wake delivers once he's idle.
+- **Heartbeat is inbox-driven.** The fleet heartbeat (`reengageGod`) no longer types directly into the orchestrator's terminal; it drops its digest in the god agent's inbox, which the busy-aware inbox-wake delivers once it's idle.
 
 ### Docs
-- Expanded the README roadmap (chat integrations, pluggable agent CLIs, realtime Michael).
+- Expanded the README roadmap (chat integrations, pluggable agent CLIs, realtime orchestrator).
 
 ## [0.2.0] — 2026-06-07
 
 The observability and control release. v0.2.0 makes the fleet visible and keeps it in check — and it's a community release in the most literal sense: most of the work below came from external contributors. Huge thanks to everyone credited.
 
 ### Added
-- **Command Center overhaul.** Michael's control surface was reworked into the place you actually run the floor from — the roster, dispatch, schedules, memory, and activity views now carry the new live signals (token budgets, telemetry, breaker state) without becoming a wall of numbers.
-- **Per-agent token budgets + live fleet monitoring.** Every agent carries a token budget, and the floor monitors consumption live so a single agent can't quietly run the bill up.
+- **Dashboard overhaul.** The orchestrator's control surface was reworked into the place you actually run the fleet from — the roster, dispatch, schedules, memory, and activity views now carry the new live signals (token budgets, telemetry, breaker state) without becoming a wall of numbers.
+- **Per-agent token budgets + live fleet monitoring.** Every agent carries a token budget, and the harness monitors consumption live so a single agent can't quietly run the bill up.
 - **Live OTel telemetry collector + per-model cost.** A built-in OpenTelemetry collector and a `UsageProvider` seam feed real usage in, with per-model cost attribution (interim transcript-backed stub behind the seam to start).
 - **Fleet grid + per-agent tool-span waterfall.** A live grid of the whole fleet, plus a per-agent tool-span waterfall that shows what an agent spent its turn doing — which tool calls ran, in what order, for how long.
 - **Agent-card context-window gauge.** The agent card's progress bar is repurposed into a context-window gauge so you can see at a glance how close each agent is to filling its context. (Thanks @Gulum — #12.)
@@ -71,33 +71,32 @@ The observability and control release. v0.2.0 makes the fleet visible and keeps 
 - **Configurable hive/memory home folder.** Point the hive and memory home at a folder of your choosing, with a safe move that relocates existing data.
 - **One-click "Restore team."** After a harness restart, a single click brings back the last session's workers — no more re-adding agents one by one. (Thanks @Gulum — #16.)
 - **Delete scheduled missions.** Scheduled missions now have a delete button. (Thanks @Gulum — #9.)
-- **New avatar states.** A compacting state (on `PreCompact`) and a looping state (when the breaker engages) so the floor reflects what the control layer is doing.
+- **New agent states.** A compacting state (on `PreCompact`) and a looping state (when the breaker engages) so the dashboard reflects what the control layer is doing.
 
 ### Fixed
 - **Terminal contrast + HiDPI legibility.** A `minimumContrastRatio` floor and a tuned light palette (including dual fg/bg-legible green/yellow) keep text legible on coloured backgrounds across both the new and legacy terminal views.
-- **Crisp, readable floor text.** A HiDPI canvas, bold bubbles, and a walk-flicker fix sharpen office-floor text; thought-cloud text now stays 1:1 when the window shrinks. (Thanks @Gulum — #20.)
+- **Crisp, readable agent labels.** A HiDPI canvas, bold bubbles, and a flicker fix sharpen agent status text; status-bubble text now stays 1:1 when the window shrinks. (Thanks @Gulum — #20.)
 - **Terminal no longer jumps to the top of history on first scroll**, and the viewport dead zone is gone (re-sync routed through xterm, not the DOM). (Thanks @Gulum — #8.)
 - **Windows: keep the hive running behind the lock screen.** The hive no longer freezes when Windows locks — keep-awake plus no throttling. (Thanks @Gulum — #18.)
 - **Live agent statuses** and **composer-draft fixes** for the message-queue composer. (Thanks @Gulum — #7, #27, #28.)
-- **Palace writer-lock serialization** and **Windows named-pipe + mempalace detection** so the hook server and semantic memory work on Windows. (Thanks @Xileck.)
+- **Memory writer-lock serialization** and **Windows named-pipe + semantic-memory detection** so the hook server and semantic memory work on Windows. (Thanks @Xileck.)
 - **Per-PTY input serialization** so the boot sequence can't jam mid-spawn; restored `+x` on the `node-pty` spawn-helper so agents can spawn.
-- **GOD orchestration tabs** are now scrollable; the title-bar settings button is a clear gear chip.
+- **Orchestrator tabs** are now scrollable; the title-bar settings button is a clear gear chip.
 - **Global `defaultModel` wins over role tier** (an explicit per-agent pick still wins); cost-ledger row is fully snake_case for a 1:1 SQLite migration (#4).
 
 ### Acknowledgements
-Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.sock` — #1), @billrehm (Windows GOD-spawn error 193 — #22), @darrensheffield (uv-not-installed assumption — #30; macOS Gatekeeper — #29), @pdurlej (first-class Codex CLI provider request — #21), @wild-gobatz (agents showing idle until clicked — #3). Maintained by @chaitanyagiri.
+Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.sock` — #1), @billrehm (Windows orchestrator-spawn error 193 — #22), @darrensheffield (uv-not-installed assumption — #30; macOS Gatekeeper — #29), @pdurlej (first-class Codex CLI provider request — #21), @wild-gobatz (agents showing idle until clicked — #3). Maintained by @chaitanyagiri.
 
 ## [0.1.9] — 2026-06-06
 
 ### Added
-- **Hourly ops standup.** A built-in scheduled mission (enabled by default) where the GOD orchestrator reviews every agent — who's doing what, whether tasks are on track, and whether agents are still running — and **compacts each terminal's context** on the same hourly cadence to keep agents lean. Toggle it in the Command Center; a one-time migration seeds it into existing installs (and won't re-add it once deleted).
+- **Hourly ops standup.** A built-in scheduled mission (enabled by default) where the orchestrator reviews every agent — who's doing what, whether tasks are on track, and whether agents are still running — and **compacts each terminal's context** on the same hourly cadence to keep agents lean. Toggle it in the dashboard; a one-time migration seeds it into existing installs (and won't re-add it once deleted).
 
 ### Fixed
 - **Agents exited on their own at a "Bypass Permissions mode" prompt.** Agents spawn with `--permission-mode bypassPermissions`, which on a fresh machine shows a one-time interactive "WARNING: Bypass Permissions mode … 1. No, exit / 2. Yes, I accept" prompt the terminal couldn't answer, so the agent exited code 1 within seconds. The harness now idempotently pre-accepts Claude Code's dangerous-mode warning (`skipDangerousModePermissionPrompt` / `skipAutoPermissionPrompt`) and per-folder trust before each spawn.
-- **Blog cards.** The colored thumbnail tile sat flush against each card's bold border; it's now inset with padding for breathing room (desktop + mobile).
-- **Windows: hook server + semantic memory.** The hook server now binds a named pipe on Windows (where Node IPC isn't a filesystem socket), and `mempalace` is detected via `where` + the standard `.exe` install locations so semantic memory works on Windows. POSIX behavior unchanged. (Thanks @Xileck — #4.)
-- **Palace mining writer-lock collisions.** Mining is now serialized — a single writer at a time with a re-entrancy guard — fixing "palace is held by PID …" failures when multiple agents mined concurrently. (Thanks @Xileck — #5.)
-- **MemPalace index noise.** Each agent's `.gitignore` is ensured before mining so `settings.json`, the cursor file, and raw inbox/outbox message JSON stay out of the semantic index — keeping recall and wake-up focused on real memory.
+- **Windows: hook server + semantic memory.** The hook server now binds a named pipe on Windows (where Node IPC isn't a filesystem socket), and the semantic-memory CLI is detected via `where` + the standard `.exe` install locations so semantic memory works on Windows. POSIX behavior unchanged. (Thanks @Xileck — #4.)
+- **Semantic-memory mining writer-lock collisions.** Mining is now serialized — a single writer at a time with a re-entrancy guard — fixing "held by PID …" failures when multiple agents mined concurrently. (Thanks @Xileck — #5.)
+- **Semantic index noise.** Each agent's `.gitignore` is ensured before mining so `settings.json`, the cursor file, and raw inbox/outbox message JSON stay out of the semantic index — keeping recall and wake-up focused on real memory.
 
 ## [0.1.8] — 2026-06-05
 
@@ -107,10 +106,10 @@ Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.soc
 ## [0.1.7] — 2026-06-04
 
 ### Added
-- **Slack → Michael's queue.** A new Slack integration (Settings → Slack) pipes a channel's messages straight into Michael's message queue — paste a message in Slack and it lands in his queue exactly as if you'd typed it. Off by default; every request is verified with your Slack signing secret (HMAC + 5-minute replay guard) before it's accepted, and a localtunnel exposes the local webhook for Slack's Event Subscriptions.
+- **Slack → the orchestrator's queue.** A new Slack integration (Settings → Slack) pipes a channel's messages straight into the orchestrator's message queue — paste a message in Slack and it lands in the queue exactly as if you'd typed it. Off by default; every request is verified with your Slack signing secret (HMAC + 5-minute replay guard) before it's accepted, and a tunnel exposes the local webhook for Slack's Event Subscriptions.
 
 ### Changed
-- **Approvals are now native.** The in-app approvals queue/panel is removed in favor of native Claude Code human-in-the-loop prompts. A `to:"human"` decision now reaches you through Michael's session and native permission prompts — approvable from your phone via `/remote-control` — and Michael boots straight into running the floor.
+- **Approvals are now native.** The in-app approvals queue/panel is removed in favor of native Claude Code human-in-the-loop prompts. A `to:"human"` decision now reaches you through the orchestrator's session and native permission prompts — approvable from your phone via `/remote-control` — and the orchestrator boots straight into running the fleet.
 
 ### Fixed
 - The floating approvals panel could re-queue an item when you approved it (`resolveApproval` re-routed the message back into the queue). Moving to native HITL removes the panel and the bug.
@@ -119,13 +118,13 @@ Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.soc
 
 ### Added
 - **Per-agent git worktrees.** A 'Git isolation' toggle in Add Agent auto-provisions a dedicated worktree (`<harnessHome>/worktrees/<agentId>/`) on spawn and tears it down on kill. Agents on the same repo never collide on branches.
-- **Task kanban with dependencies.** A Tasks tab in the Command Center renders a full kanban board (todo / doing / blocked / done). Each task carries an assignee, a `dependsOn[]` list, priority, and description — and persists in `hive/tasks.json` via a new `hive:writeTasks` IPC channel.
-- **Scheduled missions.** A Schedules section in the Floor tab lets you define recurring auto-dispatch missions (label, interval, target agent, body). The main process fires each on a `setInterval`, stamps `lastFiredAt`, and persists the list in config.
+- **Task kanban with dependencies.** A Tasks tab in the dashboard renders a full kanban board (todo / doing / blocked / done). Each task carries an assignee, a `dependsOn[]` list, priority, and description — and persists in `hive/tasks.json` via a new `hive:writeTasks` IPC channel.
+- **Scheduled missions.** A Schedules section lets you define recurring auto-dispatch missions (label, interval, target agent, body). The main process fires each on a `setInterval`, stamps `lastFiredAt`, and persists the list in config.
 - **Real token & cost telemetry.** The Activity tab reads `~/.claude/projects/` JSONL transcripts — the same files Claude Code writes — and displays actual input/output/cache token counts and estimated USD cost per agent per model. No more proxy tool-call counts.
-- **Global hive text search.** Full-text search across `board.md`, `tasks.json`, and all agent `memory.md` files, available in the Memory tab alongside MemPalace semantic search.
+- **Global hive text search.** Full-text search across `board.md`, `tasks.json`, and all agent `memory.md` files, available in the Memory tab alongside semantic search.
 - **Threaded chat.** A Messages tab in each agent's sidebar renders every hive message grouped by conversation with full reply chains and an inline reply form.
-- **Memory graph.** A visual graph in the Command Center Memory tab maps agents and their knowledge relationships.
-- **GitHub issue ingestion.** An Issues section in the Floor tab pulls open issues from any registered repo via `gh issue list` and lets you assign them to any agent with one click.
+- **Memory graph.** A visual graph in the dashboard Memory tab maps agents and their knowledge relationships.
+- **GitHub issue ingestion.** An Issues section pulls open issues from any registered repo via `gh issue list` and lets you assign them to any agent with one click.
 - **CI status watcher.** A CI Status section in the Activity tab polls `gh run list` for every registered repo and shows live pass/fail/in-progress status for GitHub Actions runs.
 - **Desktop notifications.** Native OS notifications fire when an agent finishes a task or is waiting for your input. Toggle in Settings.
 - **Agent archival.** Closing an agent's tab archives it (memory + history intact) rather than deleting it permanently.
@@ -138,77 +137,39 @@ Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.soc
 ## [0.1.5] — 2026-06-04
 
 ### Added
-- **Dwight, Michael's prep assistant.** A persistent, visible assistant agent
-  (Sonnet, 1M context) spawns on startup. A global **enrich** toggle routes
-  Michael's queued prompts through Dwight first — he gathers repo context and
-  rewrites the prompt, then forwards it to Michael through the hive; toggle it off
-  and prompts go straight to Michael.
-- **Michael's Command Center.** His sidebar becomes a control surface with
-  Terminal, Floor (agent roster + **per-agent model selector** with safe restart,
-  a dispatch box, and working dirs), Memory (MemPalace search + per-agent memory),
-  and Activity (live log feed + board + usage proxy), plus a copyable Claude
-  command handbook.
-- **Per-agent model selection** — a model picker in **Add Agent**, a shared model
-  list, and a message-queue composer with the enrich toggle.
-- **Getting-started tutorial** on the blog (canonical install + first-run walkthrough),
-  with Blog/tutorial CTAs and a redesigned "How it works" section on the landing page.
+- **A persistent prep assistant.** A persistent assistant agent (Sonnet, 1M context) spawns on startup. A global **enrich** toggle routes the orchestrator's queued prompts through the assistant first — it gathers repo context and rewrites the prompt, then forwards it to the orchestrator through the hive; toggle it off and prompts go straight to the orchestrator.
+- **The orchestrator's dashboard.** Its sidebar becomes a control surface with Terminal, Roster (agent roster + **per-agent model selector** with safe restart, a dispatch box, and working dirs), Memory (semantic search + per-agent memory), and Activity (live log feed + board + usage proxy), plus a copyable Claude command handbook.
+- **Per-agent model selection** — a model picker in **Add Agent**, a shared model list, and a message-queue composer with the enrich toggle.
+- **Getting-started tutorial** (canonical install + first-run walkthrough), with a redesigned "How it works" section.
 
 ### Fixed
-- Agents no longer read **"idle" while still working** — a Stop blocked mid-turn now
-  reports `blocked` so the UI keeps the agent in its working state.
-- Long agent thought/tool labels now **word-wrap inside their cards** instead of
-  overflowing the bubble horizontally (Pixi word-wrap with a raw-length cap so a
-  pathological string can't grow a runaway-tall card).
-- Switching agent terminals now lands at the **latest output**, while resizes
-  preserve scroll position; the idle action label no longer echoes the "idle" badge.
+- Agents no longer read **"idle" while still working** — a Stop blocked mid-turn now reports `blocked` so the UI keeps the agent in its working state.
+- Long agent thought/tool labels now **word-wrap inside their cards** instead of overflowing the bubble horizontally (word-wrap with a raw-length cap so a pathological string can't grow a runaway-tall card).
+- Switching agent terminals now lands at the **latest output**, while resizes preserve scroll position; the idle action label no longer echoes the "idle" badge.
 
 ## [0.1.4] — 2026-06-04
 
 ### Added
-- **Signed macOS builds.** The app now ships with a hardened-runtime Developer ID
-  signature (notarization is attempted in CI and stapled when it succeeds; the build is
-  best-effort, so a notarization hiccup never blocks a release). Because macOS binds a
-  folder-access (TCC) grant to a stable code signature, you're now prompted for
-  Documents/Desktop/Downloads access **once** instead of on every agent action.
-  Usage-description strings explain each prompt. Signing/notarization run in CI only
-  when Apple credentials are present, so contributor builds stay unsigned and green.
-- **Blog at [/blog](https://munderdiffl.in/blog/)** — an Eleventy-generated static blog
-  sharing the landing page's neo-brutalist design system, seeded with the first posts
-  on long-term memory, multi-agent harnesses, and MemPalace, plus tag/topic indexes and
-  an RSS feed.
-- **On-site SEO/AEO metadata** — JSON-LD, `robots.txt`, a root `sitemap.xml`, and richer
-  link-unfurl/meta tags across the site.
+- **Signed macOS builds.** The app now ships with a hardened-runtime Developer ID signature (notarization is attempted in CI and stapled when it succeeds; the build is best-effort, so a notarization hiccup never blocks a release). Because macOS binds a folder-access (TCC) grant to a stable code signature, you're now prompted for Documents/Desktop/Downloads access **once** instead of on every agent action. Usage-description strings explain each prompt. Signing/notarization run in CI only when Apple credentials are present, so contributor builds stay unsigned and green.
+- **On-site SEO/AEO metadata** — JSON-LD, `robots.txt`, a root `sitemap.xml`, and richer link-unfurl/meta tags.
 
 ## [0.1.3] — 2026-06-01
 
 ### Added
-- **Settings panel** (title-bar gear) with a **Reset & start over** action that wipes
-  Michael's memories, the entire hive (every agent, message, task, and the board), and
-  the semantic-memory palace, then relaunches the app into onboarding.
-- Boot loader ("clocking in") shown while the GOD agent initializes, so returning users
-  no longer see the empty "add agent" screen during startup.
+- **Settings panel** (title-bar gear) with a **Reset & start over** action that wipes the orchestrator's memories, the entire hive (every agent, message, task, and the board), and the semantic-memory store, then relaunches the app into onboarding.
+- Boot loader shown while the orchestrator initializes, so returning users no longer see the empty "add agent" screen during startup.
 
 ### Fixed
-- Crash dialog on quit caused by sending IPC to an already-destroyed window during
-  teardown; all renderer sends are now destroyed-safe and shutdown steps are best-effort.
-- Michael no longer marches to the door flagged "needs you" right after finishing a turn —
-  idle "waiting for input" notifications now let him linger at his desk instead of
-  escalating as a blocked/needs-action state.
+- Crash dialog on quit caused by sending IPC to an already-destroyed window during teardown; all renderer sends are now destroyed-safe and shutdown steps are best-effort.
+- The orchestrator no longer flags itself "needs you" right after finishing a turn — idle "waiting for input" notifications no longer escalate as a blocked/needs-action state.
 
 ## [Brand & rename]
 
 ### Added
-- Brand identity: **Munder Difflin** — logo (`docs/logo.svg`), square mark
-  (`docs/logo-mark.svg`), and hero banner (`docs/banner.svg`).
-- Landing page at `docs/index.html` (GitHub Pages–ready).
-- In-app branding: window title, boot screen, title-bar `MD` badge, and fullscreen
-  header captions.
-- Open-source community files: `SECURITY.md`, `CHANGELOG.md`, issue/PR templates, and a
-  CI workflow.
+- Open-source community files: `SECURITY.md`, `CHANGELOG.md`, issue/PR templates, and a CI workflow.
 
 ### Changed
-- Renamed the project from *Claude Terminal Harness* to **Munder Difflin** across the
-  README, docs (`SPEC.md`, `DESIGN.md`, `HIVE.md`), `package.json`, and the app UI.
+- Renamed the project from *Claude Terminal Harness* to **rp-agent-harness** across the README, `package.json`, and the app UI.
 
 ## [0.1.0] — 2026
 
@@ -216,17 +177,11 @@ Initial working prototype.
 
 ### Added
 - Electron + React + TypeScript shell (electron-vite).
-- Real terminals via `node-pty`, rendered with xterm.js; multi-agent spawn/write/
-  resize/kill over typed IPC (`window.cth`).
-- Pixi.js office floor: Tiled map, camera, recolored cast, pathfinding, seat assignment,
-  tool bubbles, and message envelopes.
-- The hive: on-disk multi-agent layer (`hive.ts`), hook server + `cth-hook` shim and
-  `Stop`-loop (`hooks.ts`), and a semantic memory layer (`memory.ts`).
-- GOD orchestrator agent, approvals queue, and memory search panel.
-- Sandboxed file browser + CodeMirror editor and a git tab (status, log, branches,
-  commit graph).
-- Onboarding wizard, safe-quit guard, and a tokenized SNES/Animal-Crossing design
-  system.
+- Real terminals via `node-pty`, rendered with xterm.js; multi-agent spawn/write/resize/kill over typed IPC (`window.cth`).
+- The hive: on-disk multi-agent layer (`hive.ts`), hook server + `cth-hook` shim and `Stop`-loop (`hooks.ts`), and a semantic memory layer (`memory.ts`).
+- Orchestrator (god) agent, approvals queue, and memory search panel.
+- Sandboxed file browser + CodeMirror editor and a git tab (status, log, branches, commit graph).
+- Onboarding wizard, safe-quit guard, and a tokenized design system.
 
-[Unreleased]: https://github.com/chaitanyagiri/munder-difflin/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/chaitanyagiri/munder-difflin/releases/tag/v0.1.0
+[Unreleased]: https://github.com/realpage-cole/rp-agent-harness/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/realpage-cole/rp-agent-harness/releases/tag/v0.1.0

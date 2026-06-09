@@ -2,13 +2,13 @@
   "name": "munder-difflin",
   "version": "0.2.3",
   "private": true,
-  "description": "Local multi-agent harness for Claude Code: autonomous agents that message, route, and remember — coordinated by a GOD orchestrator and visualized as avatars at work.",
+  "description": "rp-agent-harness — an internal RealPage local Electron multi-agent harness for Claude Code: autonomous agents that message, route, and remember, coordinated by a god/orchestrator hive, with a modern dashboard UI and optional Supabase collaborative sync.",
   "main": "out/main/index.js",
-  "author": "Chaitanya Giri",
-  "homepage": "https://munderdiffl.in/",
+  "author": "RealPage",
+  "homepage": "https://github.com/realpage-cole/rp-agent-harness",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chaitanyagiri/munder-difflin.git"
+    "url": "https://github.com/realpage-cole/rp-agent-harness.git"
   },
   "scripts": {
     "dev": "electron-vite dev",

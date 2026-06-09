@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- munder-difflin collaborative harness — harden the is_workspace_member helper.
+-- rp-agent-harness collaborative harness — harden the is_workspace_member helper.
 --
 -- Run AFTER 0004. The Supabase security advisor flags SECURITY DEFINER functions
 -- that are RPC-callable by `anon` (0028). is_workspace_member is only needed by

@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to Munder Difflin! -->
+<!-- Thanks for contributing to rp-agent-harness! -->
 
 ## What & why
 
@@ -20,6 +20,5 @@
 
 - [ ] `npm run typecheck` passes (the de-facto CI gate).
 - [ ] `npm run build` succeeds.
-- [ ] Any new UI derives from `DESIGN.md` / `tokens.ts` — no ad-hoc colors, spacing, or fonts.
-- [ ] If I added art, it's my own or compatibly licensed, and listed in `ATTRIBUTION.md`.
+- [ ] Any new UI derives from the existing design tokens (`tokens.ts`) — no ad-hoc colors, spacing, or fonts.
 - [ ] PR is focused on a single change.

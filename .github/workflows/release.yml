@@ -118,8 +118,8 @@ jobs:
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # RELEASE.md is the human-facing notes; GitHub shows it as the body.
-          body_path: RELEASE.md
+          # Release notes are auto-generated from commits/PRs since the last tag.
+          generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
             release/*.dmg
