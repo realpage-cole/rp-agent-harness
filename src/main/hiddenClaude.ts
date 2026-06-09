@@ -41,7 +41,7 @@ export interface HiddenClaudeOptions {
   idleMs?: number;
   /** Total timeout ms. Default 180000. */
   timeoutMs?: number;
-  /** Extra env merged over the resolved shell env (e.g. the shared MemPalace). */
+  /** Extra env merged over the resolved shell env (e.g. memory tooling). */
   env?: Record<string, string>;
 }
 

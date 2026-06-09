@@ -149,7 +149,8 @@ export interface HarnessConfig {
   defaultCommand: string;
   defaultModel?: string;
   semanticMemory: boolean;
-  embeddingModel: 'minilm' | 'embeddinggemma';
+  ollamaHost?: string;
+  ollamaEmbedModel?: string;
   missions?: ScheduledMission[];
   opsStandupSeeded?: boolean;
   heartbeatSeeded?: boolean;
@@ -176,13 +177,17 @@ export interface HarnessConfig {
 }
 
 export interface MemoryStatus {
+  /** Ollama reachable AND the embedding model pulled. */
   available: boolean;
+  /** User master toggle (config.semanticMemory). */
   enabled: boolean;
+  /** The shared Supabase store is up (team sync running + signed in). */
+  storeReady: boolean;
+  /** available && enabled && storeReady — semantic memory is fully working. */
   active: boolean;
-  initialized: boolean;
-  palacePath: string | null;
-  model: 'minilm' | 'embeddinggemma';
-  bin: string | null;
+  /** Where we reach Ollama + which model — surfaced so the panel can guide setup. */
+  host: string;
+  model: string;
 }
 
 export interface DirEntry {
@@ -372,7 +377,7 @@ const api = {
     ipcRenderer.invoke('config:update', patch),
   ensureHarnessHome: (path: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('config:ensureHome', path),
-  /** Change the harness home folder. 'move' copies the existing hive + palace
+  /** Change the harness home folder. 'move' copies the existing hive
    *  into the new folder (old kept as a safety net); 'fresh' just re-points and
    *  bootstraps an empty home. On success the app relaunches (never resolves);
    *  on failure (e.g. copy error) returns { ok: false, error }. */
@@ -411,7 +416,7 @@ const api = {
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
   hiveInbox: (id: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id),
 
-  // ─── Semantic memory (MemPalace CLI) ─────────────────────────────────────
+  // ─── Shared semantic memory (Ollama embeddings + Supabase pgvector) ──────
   memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('hive:memoryStatus'),
   searchMemory: (query: string, wing?: string): Promise<{ ok: boolean; output: string; error?: string }> =>
     ipcRenderer.invoke('hive:searchMemory', query, wing),
@@ -501,8 +506,9 @@ const api = {
   },
 
   // ─── Reset ─────────────────────────────────────────────────────────────────
-  /** Wipe all hive data + the memory palace, reset config, and relaunch the app
-   *  into onboarding. The process exits, so this promise never resolves. */
+  /** Wipe all local hive data, reset config, and relaunch the app into onboarding
+   *  (the shared semantic memory in Supabase is untouched). The process exits, so
+   *  this promise never resolves. */
   resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll'),
 
   // ─── Token telemetry (real usage + est. cost from CC transcripts) ──────────

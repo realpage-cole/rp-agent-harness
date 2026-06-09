@@ -174,9 +174,10 @@ function shortRand(): string {
   return randomBytes(3).toString('hex');
 }
 
-/** Non-memory files `mempalace mine` must not ingest (Claude Code hooks config,
- *  cursor, raw inbox/outbox JSON). `mempalace mine` honors .gitignore, so we drop
- *  one in each agent dir; written on birth here and refreshed by the mine loop. */
+/** Non-memory files kept out of the hive's git repo (Claude Code hooks config,
+ *  cursor, raw inbox/outbox JSON) — bulky/noisy churn that shouldn't be committed.
+ *  Dropped as a per-agent .gitignore on birth here. (Only memory.md is embedded
+ *  into the shared semantic memory, so the index never sees these either.) */
 const MINE_IGNORE_LINES = ['settings.json', 'cursor.json', 'inbox/', 'outbox/'];
 
 /** Idempotently ensure `<agentDir>/.gitignore` excludes the non-memory files.
@@ -320,7 +321,7 @@ export class HiveManager {
     if (!existsSync(memory)) {
       writeFileSync(memory, `# Memory — ${meta.name} (${meta.id})\n\n_Append durable facts, decisions, and context below._\n`, 'utf8');
     }
-    ensureMineIgnore(dir); // keep settings.json / cursor / messages out of mempalace's index
+    ensureMineIgnore(dir); // keep settings.json / cursor / messages out of the hive git
     const cursor = join(dir, 'cursor.json');
     if (!existsSync(cursor)) this.writeJson(cursor, { lastProcessed: null });
 
@@ -560,7 +561,7 @@ export class HiveManager {
    */
   private injectedPrompt(meta: AgentMeta, dir: string, root: string, semanticMemory: boolean): string {
     const memoryLine = semanticMemory
-      ? 'Semantic memory: the whole hive shares a searchable MemPalace at $MEMPALACE_PALACE_PATH. To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are mined into the palace automatically — write durable facts there.'
+      ? 'Shared memory: durable facts you append to memory.md are embedded (locally, via Ollama — nothing leaves the machine) into a team-wide semantic memory spanning every teammate, session, and project. Write what genuinely matters there — it makes the whole hive recall more by meaning over time. This is the living memory layer; treat memory.md as long-term knowledge, not a scratchpad.'
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
@@ -1087,8 +1088,8 @@ export class HiveManager {
    * record (those carry user.email / account / org / hashed-user-id). The sample
    * is PII-free by construction upstream (the provider's normalize step), so we
    * add no redaction here; we just must not widen what we write. The file lives
-   * at the hive ROOT, so `mempalace mine` (which only scans per-agent dirs) never
-   * ingests it — no palace noise, no MINE_IGNORE entry needed.
+   * at the hive ROOT, so the semantic-memory embedder (which only reads per-agent
+   * memory.md) never ingests it — no index noise, no .gitignore entry needed.
    *
    * Like appendLog: append to disk now (durable immediately), let it ride the
    * next natural commit. Best-effort — never throws into the beat.
@@ -1256,16 +1257,15 @@ look at one agent, read its \`agents/<id>/memory.md\` and \`inbox/\`, or send it
 Claude Code command reference (slash = your own session only; CLI = your shell, can target the fleet)
 is in \`COMMANDS.md\` in the hive root.
 
-## Semantic memory (optional — when \`mempalace\` is installed)
-When \`MEMPALACE_PALACE_PATH\` is set in your environment, the hive shares a
-searchable MemPalace and you have the \`mempalace\` CLI:
-- \`mempalace search "<query>"\` — recall relevant past knowledge across the whole
-  team by meaning (not just keywords). Add \`--wing <agent-id>\` to scope to one
-  agent, \`--results N\` to widen.
-- \`mempalace wake-up\` — a short digest of what matters, good at the start of a task.
-
-Your \`memory.md\` is mined into the palace automatically, so the durable facts you
-write there become searchable by every agent. You don't run \`mine\` yourself.
+## Shared semantic memory
+Durable facts you append to your \`memory.md\` are automatically embedded into a
+team-wide semantic memory — shared across every teammate, session, and project in
+the workspace. Embedding runs LOCALLY via Ollama (\`nomic-embed-text\`); nothing
+leaves the machine, and the vectors live in the team's shared store. You don't run
+any command for this: just keep writing durable facts to \`memory.md\` and they
+become recallable by meaning for the whole hive. The human searches this memory
+from the Hive dashboard. This is the living/breathing knowledge layer — the more
+the team records, the better future sessions get.
 `;
 
 // ─── cth-hook shim (written to <hive>/bin/cth-hook.cjs) ──────────────────────

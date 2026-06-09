@@ -19,10 +19,16 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import type { MemorySyncCtx } from './types';
+import type { MemorySyncCtx, SupabaseLike } from './types';
+import { chunkMemory } from '../memory/chunk';
+import { vectorLiteral } from '../memory/ollama';
 
 /** kv cursor prefix: last-pushed body hash per owned agent (`sync.mem.push.<id>`). */
 const K_PUSH_PREFIX = 'sync.mem.push.';
+/** kv cursor prefix: last-EMBEDDED body hash per owned agent. Independent of the
+ *  text-push cursor so a transient Ollama outage never blocks text sync (and vice
+ *  versa) — each retries on its own next tick. */
+const K_EMBED_PREFIX = 'sync.mem.embed.';
 /** kv cursor: high-water mark (max updated_at) consumed by the last pull. */
 const K_PULL_SINCE = 'sync.mem.pullSince';
 
@@ -73,34 +79,112 @@ export async function pushMemory(ctx: MemorySyncCtx): Promise<number> {
     try { body = readFileSync(mem, 'utf8'); } catch { continue; }
 
     const hash = sha1(body);
-    const cursorKey = K_PUSH_PREFIX + id;
-    if (ctx.store.getKv<string>(cursorKey) === hash) continue; // unchanged since last push
 
-    const row: Record<string, unknown> = {
-      workspace_id: ctx.workspaceId,
-      agent_id: id,
-      machine_id: ctx.machineId,
-      body,
-      content_hash: hash,
-      updated_at: Date.now()
-    };
-    if (names[id]) row.name = names[id];
-
-    let error: { message: string } | null;
-    try {
-      ({ error } = await ctx.client
-        .from('agent_memory')
-        .upsert([row], { onConflict: 'workspace_id,agent_id' }));
-    } catch {
-      // Network/client throw — leave the cursor so the next tick retries.
-      continue;
+    // (1) TEXT sync — agent_memory.body, the source of truth. Gated on its own
+    //     hash cursor; independent of the embed step below.
+    const textKey = K_PUSH_PREFIX + id;
+    if (ctx.store.getKv<string>(textKey) !== hash) {
+      const row: Record<string, unknown> = {
+        workspace_id: ctx.workspaceId,
+        agent_id: id,
+        machine_id: ctx.machineId,
+        body,
+        content_hash: hash,
+        updated_at: Date.now()
+      };
+      if (names[id]) row.name = names[id];
+      let error: { message: string } | null = null;
+      try {
+        ({ error } = await ctx.client
+          .from('agent_memory')
+          .upsert([row], { onConflict: 'workspace_id,agent_id' }));
+      } catch {
+        error = { message: 'client threw' }; // leave the cursor — retry next tick
+      }
+      if (!error) {
+        ctx.store.setKv(textKey, hash);
+        pushed += 1;
+      }
     }
-    if (error) continue; // server rejected — retry next tick (cursor unadvanced)
 
-    ctx.store.setKv(cursorKey, hash);
-    pushed += 1;
+    // (2) EMBED sync — chunk + embed this agent's memory locally (Ollama) and
+    //     upsert the vectors into the shared memory_chunks index. Gated on its
+    //     OWN cursor so an Ollama outage never blocks (or is blocked by) text
+    //     sync. Only runs when an embedder is wired in (sync/index.ts).
+    if (ctx.embed && ctx.store.getKv<string>(K_EMBED_PREFIX + id) !== hash) {
+      await pushAgentChunks(ctx, id, body, hash, names[id]);
+    }
   }
   return pushed;
+}
+
+/** Replace one agent's chunk vectors in the shared index for a changed memory.md.
+ *  chunk → embed (documents) → delete the agent's stale ordinals → insert the
+ *  fresh set, advancing the embed cursor only when the whole replace succeeds.
+ *  Best-effort: any failure (Ollama down, count mismatch, DB error) returns
+ *  without advancing the cursor, so the next push tick retries cleanly. */
+async function pushAgentChunks(
+  ctx: MemorySyncCtx,
+  agentId: string,
+  body: string,
+  hash: string,
+  name?: string
+): Promise<void> {
+  const chunks = chunkMemory(body);
+
+  // Empty memory: clear any stale vectors, then mark this hash embedded.
+  if (chunks.length === 0) {
+    if (await deleteAgentChunks(ctx, agentId)) ctx.store.setKv(K_EMBED_PREFIX + agentId, hash);
+    return;
+  }
+
+  let vectors: number[][] | null;
+  try { vectors = await ctx.embed!(chunks); } catch { return; }
+  if (!vectors || vectors.length !== chunks.length) return; // Ollama down / shape mismatch
+
+  const now = Date.now();
+  const rows = chunks.map((content, i) => ({
+    workspace_id: ctx.workspaceId,
+    machine_id: ctx.machineId,
+    agent_id: agentId,
+    chunk_id: String(i),
+    name: name ?? null,
+    owner_label: ctx.ownerLabel ?? null,
+    content,
+    content_hash: hash,
+    embedding: vectorLiteral(vectors[i]),
+    updated_at: now
+  }));
+
+  // Clear stale ordinals first (a shorter new memory leaves orphans otherwise),
+  // then insert. Advance the cursor only when both land.
+  if (!(await deleteAgentChunks(ctx, agentId))) return;
+  let error: { message: string } | null = null;
+  try {
+    ({ error } = await ctx.client
+      .from('memory_chunks')
+      .upsert(rows, { onConflict: 'workspace_id,machine_id,agent_id,chunk_id' }));
+  } catch {
+    return;
+  }
+  if (error) return;
+  ctx.store.setKv(K_EMBED_PREFIX + agentId, hash);
+}
+
+/** Delete every chunk this machine owns for one agent. Returns true on success
+ *  (so the caller knows it's safe to advance the cursor). Best-effort. */
+async function deleteAgentChunks(ctx: MemorySyncCtx, agentId: string): Promise<boolean> {
+  try {
+    const { error } = await ctx.client
+      .from('memory_chunks')
+      .delete()
+      .eq('workspace_id', ctx.workspaceId)
+      .eq('machine_id', ctx.machineId)
+      .eq('agent_id', agentId);
+    return !error;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -174,4 +258,74 @@ export async function pullMemory(ctx: MemorySyncCtx): Promise<string[]> {
   const next = Number.isFinite(minFailed) ? Math.min(maxConsumed, minFailed - 1) : maxConsumed;
   if (next > since) ctx.store.setKv(K_PULL_SINCE, next);
   return written;
+}
+
+// ─── shared semantic-memory READ path (memory_chunks) ────────────────────────
+
+/** One recalled memory chunk from the shared index. `similarity` is 1 - cosine
+ *  distance for a search hit (null for a recency listing). */
+export interface MemoryChunkHit {
+  agentId: string;
+  machineId: string;
+  ownerLabel: string | null;
+  name: string | null;
+  content: string;
+  similarity: number | null;
+}
+
+function mapHit(r: Record<string, unknown>): MemoryChunkHit {
+  return {
+    agentId: typeof r.agent_id === 'string' ? r.agent_id : '',
+    machineId: typeof r.machine_id === 'string' ? r.machine_id : '',
+    ownerLabel: typeof r.owner_label === 'string' ? r.owner_label : null,
+    name: typeof r.name === 'string' ? r.name : null,
+    content: typeof r.content === 'string' ? r.content : '',
+    similarity: typeof r.similarity === 'number' ? r.similarity : null
+  };
+}
+
+/** Cosine top-K recall across the WHOLE workspace's memory (every teammate, every
+ *  session, every project) via the match_memory_chunks RPC. The query vector is
+ *  embedded LOCALLY by the caller (Ollama) and passed as a pgvector literal.
+ *  `agent` scopes to one agent. Best-effort: any error yields []. */
+export async function matchMemoryChunks(
+  client: SupabaseLike,
+  workspaceId: string,
+  embedding: number[],
+  k: number,
+  agent?: string
+): Promise<MemoryChunkHit[]> {
+  try {
+    const { data, error } = await client.rpc('match_memory_chunks', {
+      p_workspace: workspaceId,
+      p_query: vectorLiteral(embedding),
+      p_k: k,
+      p_agent: agent ?? null
+    });
+    if (error || !data) return [];
+    return data.map(mapHit);
+  } catch {
+    return [];
+  }
+}
+
+/** The most recently updated chunks across the workspace — a no-query "what's
+ *  fresh in the team's memory" digest (backs wake-up). Best-effort: []. */
+export async function recentMemoryChunks(
+  client: SupabaseLike,
+  workspaceId: string,
+  k: number
+): Promise<MemoryChunkHit[]> {
+  try {
+    const { data, error } = await client
+      .from('memory_chunks')
+      .select('agent_id, machine_id, owner_label, name, content, updated_at')
+      .eq('workspace_id', workspaceId)
+      .order('updated_at', { ascending: false })
+      .limit(k);
+    if (error || !data) return [];
+    return data.map(mapHit);
+  } catch {
+    return [];
+  }
 }

@@ -5,26 +5,18 @@ import { PixelButton } from './PixelButton';
 interface MemoryStatus {
   available: boolean;
   enabled: boolean;
+  storeReady: boolean;
   active: boolean;
-  initialized: boolean;
-  palacePath: string | null;
-  model: 'minilm' | 'embeddinggemma';
-  bin: string | null;
+  host: string;
+  model: string;
 }
 
-type ModelId = 'minilm' | 'embeddinggemma';
-
-// Plain-language framing of each model — lead with the benefit the user actually
-// chooses between, not the model's codename.
-const MODELS: { id: ModelId; title: string; detail: string }[] = [
-  { id: 'minilm',         title: 'Fast',         detail: 'English only · ~90 MB' },
-  { id: 'embeddinggemma', title: 'Multilingual', detail: 'all languages · ~300 MB' },
-];
-
 /**
- * Lets the human search the shared memory agents build up across sessions, turn
- * it on/off, and pick how it searches. Agents read/write it directly; this is
- * the human-facing window into the same memory.
+ * The human-facing window into the hive's shared semantic memory. Agents write
+ * durable facts to their memory.md; the harness embeds those LOCALLY via Ollama
+ * and stores the vectors in the team's shared Supabase index, so this searches
+ * the whole team's knowledge across sessions and projects. Lets the human search
+ * it and toggle the feature on/off.
  */
 export function MemoryPanel() {
   const [open, setOpen] = useState(false);
@@ -38,10 +30,6 @@ export function MemoryPanel() {
   };
   useEffect(() => { refreshStatus(); }, []);
 
-  const setModel = async (model: ModelId) => {
-    await window.cth.updateConfig({ embeddingModel: model });
-    await refreshStatus();
-  };
   const toggleEnabled = async () => {
     await window.cth.updateConfig({ semanticMemory: !(status?.enabled ?? true) });
     await refreshStatus();
@@ -60,18 +48,18 @@ export function MemoryPanel() {
   };
 
   const active = status?.active;
-  const pill = active ? `🧠 memory · ${status?.model}` : '🧠 memory';
+  const pill = '🧠 memory';
 
-  // One clear state line: is memory working, off, or not set up?
-  const state: { dot: string; label: string } = !status?.available
-    ? { dot: 'var(--cth-coral)', label: 'Not set up' }
-    : !status.enabled
-      ? { dot: 'var(--cth-ink-500)', label: 'Off' }
-      : status.initialized
-        ? { dot: 'var(--cth-mint)', label: 'On · ready' }
-        : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };
+  // One clear state line, in priority order: off → Ollama down → needs sync → ready.
+  const state: { dot: string; label: string } = !status?.enabled
+    ? { dot: 'var(--cth-ink-500)', label: 'Off' }
+    : !status.available
+      ? { dot: 'var(--cth-coral)', label: 'Ollama not reachable' }
+      : !status.storeReady
+        ? { dot: 'var(--cth-lemon)', label: 'On · needs team sync' }
+        : { dot: 'var(--cth-mint)', label: 'On · ready' };
 
-  const canSearch = !!status?.available && !!status?.enabled;
+  const canSearch = !!status?.active;
 
   return (
     <div style={{ position: 'absolute', bottom: 12, left: 12, width: open ? 380 : 'auto', zIndex: 40 }}>
@@ -98,7 +86,7 @@ export function MemoryPanel() {
 
             {/* What this is — one plain line. */}
             <div style={{ fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.5 }}>
-              What your agents remember across sessions, shared between them. Search it by meaning, not just exact words.
+              The team's living memory: durable facts your agents record are embedded locally (via Ollama) and shared across every teammate, session, and project. Search it by meaning, not exact words.
             </div>
 
             {/* Status + on/off — the two things the user controls at a glance. */}
@@ -107,7 +95,7 @@ export function MemoryPanel() {
                 <span style={{ width: 9, height: 9, background: state.dot, boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)' }} />
                 {state.label}
               </span>
-              {status?.available && (
+              {status && (
                 <PixelButton
                   variant={status.enabled ? 'secondary' : 'primary'}
                   size="sm"
@@ -118,23 +106,19 @@ export function MemoryPanel() {
               )}
             </div>
 
-            {/* Not installed: show full self-sufficient setup so any machine can follow it. */}
-            {!status?.available && (
+            {/* Ollama unreachable: show self-sufficient local setup (HuggingFace is
+                blocked by the network policy, so embeddings run via local Ollama). */}
+            {status?.enabled && !status.available && (
               <div style={{
                 fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.6,
                 background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 10
               }}>
-                Meaning-based search isn't installed yet. Run these commands to set it up:
+                Embeddings run on local Ollama (no data leaves your machine). Start it and pull the model:
                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <div style={{ color: 'var(--cth-ink-500)', fontSize: 11, marginBottom: 2 }}>
-                    If{' '}
-                    <code style={{ fontFamily: 'var(--cth-font-mono)', background: 'var(--cth-paper-100)', padding: '1px 4px', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>uv</code>
-                    {' '}isn't installed yet, install it first:
-                  </div>
                   {[
-                    'curl -LsSf https://astral.sh/uv/install.sh | sh',
-                    'source ~/.zshrc  # or restart the terminal',
-                    'uv tool install mempalace',
+                    'brew install ollama   # or download from ollama.com',
+                    'ollama serve          # start the local server',
+                    `ollama pull ${status.model}`,
                   ].map((cmd) => (
                     <code key={cmd} style={{
                       display: 'block',
@@ -145,45 +129,18 @@ export function MemoryPanel() {
                   ))}
                 </div>
                 <div style={{ marginTop: 8, color: 'var(--cth-ink-500)' }}>
-                  Agents still keep plain notes without it.
+                  Looking for Ollama at {status.host}. Agents still keep plain notes without this.
                 </div>
               </div>
             )}
 
-            {/* Model: a benefit-framed choice, not a codename dump. */}
-            {status?.available && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-display)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  Search language
-                </span>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {MODELS.map((m) => {
-                    const sel = status.model === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        onClick={() => setModel(m.id)}
-                        style={{
-                          flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
-                          padding: '7px 9px 6px',
-                          background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
-                          boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
-                          fontFamily: 'var(--cth-font-ui)'
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
-                          <span style={{
-                            width: 8, height: 8, flexShrink: 0,
-                            background: sel ? 'var(--cth-ink-900)' : 'transparent',
-                            boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
-                          }} />
-                          {m.title}
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
-                      </button>
-                    );
-                  })}
-                </div>
+            {/* Ollama is up but the shared store needs team sync + sign-in. */}
+            {status?.enabled && status.available && !status.storeReady && (
+              <div style={{
+                fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.6,
+                background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 10
+              }}>
+                Ollama is ready. The shared memory lives in your team's Supabase — turn on team sync and sign in (Settings) to embed and search it.
               </div>
             )}
 

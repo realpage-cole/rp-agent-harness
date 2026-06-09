@@ -43,6 +43,9 @@ export interface SyncStore {
  */
 export interface SupabaseLike {
   from(table: string): SupabaseTable;
+  /** Call a Postgres function (PostgREST RPC). Used by the shared semantic-memory
+   *  search (`match_memory_chunks`). Awaitable to `{ data, error }`. */
+  rpc(fn: string, params?: Record<string, unknown>): SupabaseSelect;
   /** Open (or reuse) a realtime channel by name (Phase 3 shared-state pull). */
   channel(name: string): RealtimeChannelLike;
   /** Tear down a realtime channel opened via `channel()`. */
@@ -105,6 +108,9 @@ export interface SupabaseTable {
     opts?: { onConflict?: string; ignoreDuplicates?: boolean }
   ): Promise<{ error: { message: string } | null }>;
   select(cols?: string): SupabaseSelect;
+  /** Begin a DELETE; the returned builder is filtered with eq() then awaited.
+   *  Used to clear an agent's stale memory_chunks before re-inserting. */
+  delete(): SupabaseSelect;
 }
 
 /** A filtered select. Every filter returns the same builder (loose by design),
@@ -113,6 +119,8 @@ export interface SupabaseSelect extends PromiseLike<SupabaseResult> {
   eq(column: string, value: unknown): SupabaseSelect;
   neq(column: string, value: unknown): SupabaseSelect;
   gt(column: string, value: unknown): SupabaseSelect;
+  order(column: string, opts?: { ascending?: boolean }): SupabaseSelect;
+  limit(count: number): SupabaseSelect;
 }
 
 /** The awaited result of a select chain. */
@@ -141,6 +149,15 @@ export interface MemorySyncCtx {
   home: string;
   /** Asks the MemoryManager to re-mine after a pull wrote new mirror memories. */
   requestMine?: () => void;
+  /** Local Ollama embedder (memory/ollama.ts). When present, pushMemory also
+   *  chunks + embeds each OWNED agent's memory.md and upserts the vectors into the
+   *  shared `memory_chunks` table (the semantic-memory layer). Absent = text-only
+   *  sync, no embeddings (Ollama unreachable / disabled). Returns the document
+   *  vectors in input order, or null on any failure (retried next tick). */
+  embed?: (texts: string[]) => Promise<number[][] | null>;
+  /** Friendly owner label (the signed-in email) stamped on pushed chunk rows for
+   *  UI attribution — mirrors the agents/tasks owner_label. */
+  ownerLabel?: string;
 }
 
 /**

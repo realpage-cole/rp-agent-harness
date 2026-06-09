@@ -105,10 +105,16 @@ export interface HarnessConfig {
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;
-  /** Enable semantic memory (MemPalace CLI). No-op if mempalace isn't installed. */
+  /** Master toggle for shared semantic memory (LOCAL Ollama embeddings + the
+   *  workspace's Supabase pgvector index). No-op until Ollama is reachable AND
+   *  team sync is on + signed in; the markdown memory always works regardless. */
   semanticMemory: boolean;
-  /** Embedding model for the palace: lightweight 'minilm' or multilingual 'embeddinggemma'. */
-  embeddingModel: 'minilm' | 'embeddinggemma';
+  /** Ollama server base URL for local embeddings (HuggingFace is network-blocked,
+   *  so embeddings run via Ollama). Default http://localhost:11434. */
+  ollamaHost?: string;
+  /** Ollama embedding model tag. Default 'nomic-embed-text' (768-dim — must match
+   *  the memory_chunks vector width; changing it requires a re-embed). */
+  ollamaEmbedModel?: string;
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** One-time guard: has the built-in hourly ops standup been seeded into an
@@ -199,7 +205,6 @@ const DEFAULTS: HarnessConfig = {
   autoMode: true,
   defaultCommand: 'claude',
   semanticMemory: true,
-  embeddingModel: 'minilm',
   missions: [OPS_STANDUP_MISSION],
   notifications: false,
   slackEnabled: false,

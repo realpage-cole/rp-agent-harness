@@ -17,7 +17,8 @@ import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './
 import { HookServer } from './hooks';
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import type { UsageProvider } from './usage';
-import { MemoryManager } from './memory';
+import { MemoryManager, type MemorySettings } from './memory';
+import { embed as ollamaEmbed } from './memory/ollama';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens } from './transcript';
@@ -83,10 +84,26 @@ telemetry.onApiError((agentId) => breaker.recordError(agentId));
 // HookServer needs BOTH: Oscar's control registry (HITL pause/gate/steer/halt via
 // hook returns) AND Jim's breaker (feed recordToolUse on each PostToolUse).
 const hookServer = new HookServer(hive, () => liveWebContents(), () => readConfig(), control, breaker);
-const memory = new MemoryManager(
-  () => readConfig().harnessHome,
-  () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; }
-);
+/** Live semantic-memory settings (Ollama host/model + master toggle), read fresh
+ *  so a Settings change applies on the next embed/search without a restart. */
+function memorySettings(): MemorySettings {
+  const c = readConfig();
+  return {
+    enabled: c.semanticMemory !== false,
+    host: c.ollamaHost ?? 'http://localhost:11434',
+    model: c.ollamaEmbedModel ?? 'nomic-embed-text'
+  };
+}
+// Shared semantic memory: LOCAL Ollama embeddings + the workspace's Supabase
+// pgvector index. Reads (search/wake-up) go through the SyncManager bridge below;
+// writes (embedding owned agents' memory.md) ride the sync push beat. The store
+// bridge is lazy — `syncManager` is declared just below and only invoked at
+// search time, never during construction.
+const memory = new MemoryManager(memorySettings, {
+  canRun: () => syncManager.canRunMemory(),
+  match: (embedding, k, agent) => syncManager.matchMemoryChunks(embedding, k, agent),
+  recent: (k) => syncManager.recentMemoryChunks(k)
+});
 /** Reads the reflect tunables from config each tick (defaults baked in here so a
  *  pre-existing config.json without the keys still gets sane values). */
 function reflectSettings(): ReflectSettings {
@@ -135,9 +152,14 @@ const syncManager = new SyncManager(
       const wc = liveWebContents();
       if (wc) try { wc.send(channel, payload); } catch { /* window tore down */ }
     },
-    // A pull that wrote new mirror memories asks the janitor to re-mine so the
-    // teammate's memory shows up in this machine's palace.
-    requestMine: () => { try { void memory.mineNow(); } catch { /* best-effort */ } },
+    // Local Ollama embedder for the memory push: chunk + embed each owned agent's
+    // memory.md into the shared `memory_chunks` index. Returns null (no-op, retried)
+    // when semantic memory is off or Ollama is unreachable — never throws.
+    embed: (texts) => {
+      const s = memorySettings();
+      if (!s.enabled) return Promise.resolve(null);
+      return ollamaEmbed(texts, s, 'document');
+    },
     // Phase 3 — the HiveBridge seam to the hive's shared state. sync/state.ts
     // stays PURE TRANSPORT (it knows the DB schema, not the hive file shapes);
     // the HiveManager owns all registry/tasks/board <-> DB shaping + the LWW
@@ -577,13 +599,13 @@ function slackReplyScriptPath(): string {
 }
 
 /** Where the helper discovers `{ port, token }` for the loopback endpoint. Kept
- *  under userData (NOT the git repo, NOT mined into MemPalace). */
+ *  under userData (NOT the git repo, NOT embedded into the shared memory). */
 function slackReplyConfigPath(): string {
   return join(app.getPath('userData'), 'slack-reply.json');
 }
 
 /** Ledger of task ids whose done-summary has already been posted. Ids ONLY — no
- *  secret ever lands here. Under userData (out of the repo, out of MemPalace). */
+ *  secret ever lands here. Under userData (out of the repo, out of the index). */
 function slackDoneNotifiedPath(): string {
   return join(app.getPath('userData'), 'slack-done-notified.json');
 }
@@ -1018,10 +1040,9 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
     try {
       const inj = hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
-        { semanticMemory: memory.active(), theme: readConfig().terminalTheme ?? 'light' }
+        { semanticMemory: memory.configured(), theme: readConfig().terminalTheme ?? 'light' }
       );
       opts.args = [...(opts.args ?? []), ...inj.args];
-      // Point the agent's mempalace CLI at the shared palace (no-op if inactive).
       opts.env = { ...(opts.env ?? {}), ...inj.env, ...memory.env() };
     } catch (e) {
       // Hive provisioning is best-effort; never block a spawn on it.
@@ -1149,9 +1170,9 @@ ipcMain.handle('config:ensureHome', (_evt, path: unknown) => {
   return ensureHarnessHome(path);
 });
 
-// Change the harnessHome folder. Because every derived path (hive root, palace,
-// sock, agent dirs) resolves lazily through getHome(), the only real work is
-// optionally MOVING the existing hive + palace and relaunching so every service
+// Change the harnessHome folder. Because every derived path (hive root, sock,
+// agent dirs) resolves lazily through getHome(), the only real work is
+// optionally MOVING the existing hive and relaunching so every service
 // re-binds against the new root. mode: 'move' copies the data (old kept as a
 // safety net), 'fresh' just re-points and bootstraps an empty home.
 ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
@@ -1188,7 +1209,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 
   if (mode === 'move' && oldHome) {
     try {
-      for (const sub of ['hive', 'palace']) {
+      for (const sub of ['hive']) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
         // cpSync copies the whole tree incl. .git and is cross-device safe (unlike
@@ -1285,15 +1306,17 @@ ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
   return { ok: true };
 });
 
-// ─── IPC: semantic memory (MemPalace CLI) ───────────────────────────────────
-ipcMain.handle('hive:memoryStatus', () => { memory.resetBinCache(); return memory.status(); });
+// ─── IPC: shared semantic memory (Ollama embeddings + Supabase pgvector) ─────
+ipcMain.handle('hive:memoryStatus', () => { memory.resetProbe(); return memory.status(); });
 ipcMain.handle('hive:searchMemory', (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
   return memory.search(query, { wing: typeof wing === 'string' ? wing : undefined });
 });
 ipcMain.handle('hive:memoryWakeUp', (_evt, wing: unknown) =>
   memory.wakeUp(typeof wing === 'string' ? wing : undefined));
-ipcMain.handle('hive:mineNow', () => { memory.mineNow(); return { ok: true }; });
+// "Embed now": kick an immediate sync push so changed memory.md files are
+// chunked + embedded into the shared index without waiting for the next beat.
+ipcMain.handle('hive:mineNow', () => { void syncManager.pushNow(); return { ok: true }; });
 // Condense memory.md on demand: an explicit id condenses that one agent (skips
 // the size trigger — a "condense now" button); no id runs a full threshold scan.
 ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>
@@ -1377,10 +1400,11 @@ ipcMain.handle('app:resetAll', () => {
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
-  // Erase the hive (the orchestrator's + every agent's memory, inboxes, tasks, board,
-  // git history) and the semantic-memory palace. Only these harness-created
-  // subdirs are removed — never the user's whole harnessHome folder.
-  for (const dir of [hive.root(), memory.palacePath()]) {
+  // Erase the hive (the orchestrator's + every agent's memory, inboxes, tasks,
+  // board, git history). Only this harness-created subdir is removed — never the
+  // user's whole harnessHome folder, and never the SHARED semantic memory in
+  // Supabase (that's team data; a local reset must not nuke teammates' recall).
+  for (const dir of [hive.root()]) {
     if (!dir) continue;
     try { rmSync(dir, { recursive: true, force: true }); }
     catch (e) { console.error('[reset] rm', dir, e); }
@@ -1710,7 +1734,7 @@ function bootstrapHiveServices(): void {
     if (r.ok && r.endpoint) { hive.setOtelEndpoint(r.endpoint); console.log('[telemetry] collector listening', r.endpoint); }
     else console.error('[telemetry] collector failed to start:', r.error);
   });
-  memory.start(); // init shared palace + mine loop (no-op without mempalace)
+  memory.start(); // warm the Ollama reachability probe (embedding rides the sync beat)
   reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
 
   // Always-on beats (decoupled from the optional heartbeat): the live fleet
