@@ -42,7 +42,7 @@ import {
 import { errMsg } from './io';
 import { pushAppendOnly } from './push';
 import { pushMemory, pullMemory } from './memory';
-import { pushState, pullStateOnce, subscribeState } from './state';
+import { pushState, pullStateOnce, subscribeState, listTaskOwners, fetchTeammateTasks, type TaskBoardOwner } from './state';
 import * as auth from './auth';
 
 export type {
@@ -367,6 +367,30 @@ export class SyncManager {
     return this.ensureWorkspace({ create: false, id });
   }
 
+  // ─── teammate-board read (the kanban toggle) ───────────────────────────────
+
+  /** List the teammate task-boards available to view in this workspace (everyone
+   *  but this machine). Read-only; gated on a signed-in, configured client. */
+  async listTaskBoards(): Promise<TaskBoardOwner[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await listTaskOwners(this.client, s.workspaceId, this.machineId());
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Fetch a teammate's kanban (read-only) — same `{ tasks: [...] }` shape as
+   *  hiveTasks(), so the renderer reuses its parser. */
+  async teammateTasks(machineId: string): Promise<{ tasks: unknown[] }> {
+    if (!this.client || !this.auth.signedIn) return { tasks: [] };
+    const s = this.settings();
+    if (!s.workspaceId || !machineId) return { tasks: [] };
+    try {
+      return await fetchTeammateTasks(this.client, s.workspaceId, machineId);
+    } catch (e) { this.lastError = errMsg(e); return { tasks: [] }; }
+  }
+
   /** Shared body for create/join: gate on a signed-in client, then delegate the
    *  DB rows to auth.ensureWorkspace. Best-effort — never throws. */
   private async ensureWorkspace(
@@ -405,7 +429,8 @@ export class SyncManager {
       workspaceId: s.workspaceId,
       machineId: this.machineId(),
       hive: this.deps.hive,
-      emit: this.deps.emit
+      emit: this.deps.emit,
+      ownerLabel: this.auth.email ?? undefined
     };
   }
 

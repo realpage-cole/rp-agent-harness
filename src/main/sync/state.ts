@@ -25,7 +25,6 @@ import { errMsg } from './io';
 // Per-table pull cursors (high-water mark = max updated_at consumed) + the
 // last-pushed board stamp (cheap skip of a redundant board upsert).
 const K_AGENTS_SINCE = 'sync.state.agents.since';
-const K_TASKS_SINCE = 'sync.state.tasks.since';
 const K_BOARD_SINCE = 'sync.state.board.since';
 const K_BOARD_PUSHED = 'sync.state.board.pushed';
 
@@ -59,7 +58,13 @@ export async function pushState(ctx: StateSyncCtx): Promise<number> {
   }
 
   // ─── tasks (onConflict workspace_id,task_id) ────────────────────────────────
-  const tasks = (rows.tasks ?? []).map((r) => stamp(r, ctx, now));
+  // Tagged with owner_label (the owner's signed-in email) so a teammate's board
+  // can be listed + viewed on demand. We PUSH our own tasks but never merge a
+  // teammate's back into the local board (see hive.applyStateRows).
+  const tasks = (rows.tasks ?? []).map((r) => ({
+    ...stamp(r, ctx, now),
+    owner_label: ctx.ownerLabel ?? null
+  }));
   if (tasks.length > 0) {
     if (!(await upsert(ctx.client, 'tasks', tasks, 'workspace_id,task_id'))) {
       pushed += tasks.length;
@@ -99,22 +104,22 @@ export async function pushState(ctx: StateSyncCtx): Promise<number> {
  */
 export async function pullStateOnce(ctx: StateSyncCtx): Promise<number> {
   const agentsSince = ctx.store.getKv<number>(K_AGENTS_SINCE) ?? 0;
-  const tasksSince = ctx.store.getKv<number>(K_TASKS_SINCE) ?? 0;
   const boardSince = ctx.store.getKv<number>(K_BOARD_SINCE) ?? 0;
 
+  // NOTE: tasks are deliberately NOT pulled into the merge — each machine keeps
+  // its own board (a teammate's kanban is viewed on demand, not merged). Only the
+  // roster (agents) + blackboard (board) are reconciled here.
   const agentsRaw = await select(ctx.client, 'agents', ctx.workspaceId, agentsSince);
-  const tasksRaw = await select(ctx.client, 'tasks', ctx.workspaceId, tasksSince);
   const boardRaw = await select(ctx.client, 'board', ctx.workspaceId, boardSince);
 
   const agents = agentsRaw.map(toDomainRow);
-  const tasks = tasksRaw.map(toDomainRow);
   const board = boardRow(boardRaw);
 
-  const applied = agents.length + tasks.length + (board ? 1 : 0);
+  const applied = agents.length + (board ? 1 : 0);
   if (applied === 0) return 0;
 
   try {
-    ctx.hive.applyStateRows({ agents, tasks, board });
+    ctx.hive.applyStateRows({ agents, board });
   } catch {
     // The merge is best-effort; leave the cursors so the next pass retries.
     return 0;
@@ -122,7 +127,6 @@ export async function pullStateOnce(ctx: StateSyncCtx): Promise<number> {
 
   // Only advance cursors AFTER a successful apply, each to the max stamp seen.
   advanceCursor(ctx, K_AGENTS_SINCE, agentsSince, agentsRaw);
-  advanceCursor(ctx, K_TASKS_SINCE, tasksSince, tasksRaw);
   advanceCursor(ctx, K_BOARD_SINCE, boardSince, boardRaw);
 
   return applied;
@@ -143,13 +147,11 @@ export function subscribeState(ctx: StateSyncCtx, onApplied: () => void): () => 
 
   // Apply a single realtime row for one table, then notify. Best-effort: a bad
   // payload or a throwing merge is swallowed (the 30s catch-up will reconcile).
-  const applyOne = (table: 'agents' | 'tasks' | 'board', fresh?: Record<string, unknown>): void => {
+  const applyOne = (table: 'agents' | 'board', fresh?: Record<string, unknown>): void => {
     if (!fresh) return;
     try {
       if (table === 'agents') {
         ctx.hive.applyStateRows({ agents: [toDomainRow(fresh)] });
-      } else if (table === 'tasks') {
-        ctx.hive.applyStateRows({ tasks: [toDomainRow(fresh)] });
       } else {
         const b = boardRow([fresh]);
         if (!b) return;
@@ -161,8 +163,10 @@ export function subscribeState(ctx: StateSyncCtx, onApplied: () => void): () => 
     onApplied();
   };
 
+  // tasks are intentionally NOT subscribed: a teammate's kanban is viewed on
+  // demand, never merged into the local board.
   try {
-    for (const table of ['agents', 'tasks', 'board'] as const) {
+    for (const table of ['agents', 'board'] as const) {
       const ch = ctx.client
         .channel(`state:${ctx.workspaceId}:${table}`)
         .on(
@@ -269,5 +273,62 @@ async function upsert(
     return error ? error.message : null;
   } catch (e) {
     return errMsg(e);
+  }
+}
+
+// ─── teammate-board read path (the kanban toggle) ────────────────────────────
+
+/** A teammate's task board, identified by their origin machine + friendly label. */
+export interface TaskBoardOwner {
+  machineId: string;
+  ownerLabel: string | null;
+}
+
+/** List the distinct task-board owners in this workspace (machine_id + owner_label),
+ *  EXCLUDING this machine — the teammates whose kanbans you can switch to. Dedupes
+ *  in JS (PostgREST has no clean DISTINCT). Best-effort: any error yields []. */
+export async function listTaskOwners(
+  client: SupabaseLike,
+  workspaceId: string,
+  excludeMachineId: string
+): Promise<TaskBoardOwner[]> {
+  try {
+    const { data, error } = await client
+      .from('tasks')
+      .select('machine_id, owner_label')
+      .eq('workspace_id', workspaceId)
+      .neq('machine_id', excludeMachineId);
+    if (error || !data) return [];
+    const seen = new Map<string, string | null>();
+    for (const row of data) {
+      const mid = typeof row.machine_id === 'string' ? row.machine_id : null;
+      if (!mid || seen.has(mid)) continue;
+      seen.set(mid, typeof row.owner_label === 'string' ? row.owner_label : null);
+    }
+    return [...seen.entries()].map(([machineId, ownerLabel]) => ({ machineId, ownerLabel }));
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch a teammate's task cards (the full payloads) for READ-ONLY viewing.
+ *  Returns the same `{ tasks: [...] }` shape as window.cth.hiveTasks(), so the
+ *  renderer reuses its existing parser. Best-effort: any error yields no tasks. */
+export async function fetchTeammateTasks(
+  client: SupabaseLike,
+  workspaceId: string,
+  machineId: string
+): Promise<{ tasks: unknown[] }> {
+  try {
+    const { data, error } = await client
+      .from('tasks')
+      .select('payload')
+      .eq('workspace_id', workspaceId)
+      .eq('machine_id', machineId);
+    if (error || !data) return { tasks: [] };
+    const tasks = data.map((r) => r.payload).filter((p) => p && typeof p === 'object');
+    return { tasks };
+  } catch {
+    return { tasks: [] };
   }
 }

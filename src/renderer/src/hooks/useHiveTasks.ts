@@ -100,3 +100,38 @@ export function useHiveTasks(pollMs = 5000): UseHiveTasks {
   groupedRef.current = group(tasks);
   return { tasks, grouped: groupedRef.current, loaded };
 }
+
+/**
+ * Polls a TEAMMATE's kanban (read-only) via window.cth.syncTeammateTasks(machineId)
+ * — same parsed/grouped shape as useHiveTasks, so the board renders identically.
+ * When `machineId` is null the hook is idle (empty board). Backs the board toggle:
+ * a coworker's board is viewed on demand from Supabase, never merged into the
+ * local hive.
+ */
+export function useTeammateTasks(machineId: string | null, pollMs = 5000): UseHiveTasks {
+  const [tasks, setTasks] = useState<DashboardTask[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const groupedRef = useRef<GroupedTasks>(EMPTY_GROUPS);
+
+  useEffect(() => {
+    if (!machineId) { setTasks([]); setLoaded(true); return; }
+    let cancelled = false;
+    setLoaded(false);
+    const poll = async (): Promise<void> => {
+      try {
+        const raw = await window.cth.syncTeammateTasks(machineId);
+        if (cancelled) return;
+        setTasks(parseTasks(raw));
+        setLoaded(true);
+      } catch {
+        if (!cancelled) setLoaded(true);
+      }
+    };
+    void poll();
+    const handle = setInterval(() => { void poll(); }, pollMs);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [machineId, pollMs]);
+
+  groupedRef.current = group(tasks);
+  return { tasks, grouped: groupedRef.current, loaded };
+}

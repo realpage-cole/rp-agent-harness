@@ -709,6 +709,13 @@ const api = {
    *  — NEVER tokens. */
   syncJoinWorkspace: (opts: { id: string }): Promise<{ ok: boolean; id?: string; error?: string }> =>
     ipcRenderer.invoke('sync:joinWorkspace', opts),
+  /** List teammate task-boards (machine_id + owner label) you can switch to —
+   *  everyone in the workspace but you. Read-only. */
+  syncListTaskBoards: (): Promise<{ machineId: string; ownerLabel: string | null }[]> =>
+    ipcRenderer.invoke('sync:listTaskBoards'),
+  /** Fetch a teammate's kanban (read-only); same `{ tasks: [...] }` shape as hiveTasks(). */
+  syncTeammateTasks: (machineId: string): Promise<{ tasks: unknown[] }> =>
+    ipcRenderer.invoke('sync:teammateTasks', machineId),
   /** Subscribe to sync status pushes (emitted when a pull lands new memory);
    *  returns an unsubscribe fn. */
   onSyncEvent: (cb: (s: SyncStatus) => void): (() => void) => {
