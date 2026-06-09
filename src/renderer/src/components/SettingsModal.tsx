@@ -542,7 +542,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
   const reset = async () => {
     setBusy(true);
     clearLocalState();
-    // Wipes hive + palace, resets config, and relaunches into onboarding.
+    // Wipes the local hive, resets config, and relaunches into onboarding.
     // The app exits, so this never resolves - no need to clear `busy`.
     await window.cth.resetAll();
   };
@@ -562,7 +562,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
   const applyChangeHome = async () => {
     if (!changeHome) return;
     setChangeBusy(true); setChangeErr('');
-    // Moving copies the hive (incl. its .git) + palace, so the new home owns the
+    // Moving copies the hive (incl. its .git), so the new home owns the
     // same renderer-side roster - keep localStorage. A 'fresh' home starts empty,
     // so clear the renderer cache to match.
     if (changeMode === 'fresh') clearLocalState();
@@ -626,7 +626,7 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
               {/* Move vs. fresh - two selectable option rows; move is preselected. */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {([
-                  ['move', 'Move existing data (recommended)', "Copy this harness's hive (every agent, memory, task) and the semantic-memory palace into the new folder. The old folder is left untouched as a backup you can delete later."],
+                  ['move', 'Move existing data (recommended)', "Copy this harness's hive (every agent, memory, task) into the new folder. The old folder is left untouched as a backup you can delete later."],
                   ['fresh', 'Start fresh', 'Point the harness at the new (empty) folder. Your existing data stays in the old folder, simply unused.']
                 ] as const).map(([value, title, desc]) => {
                   const selected = changeMode === value;
@@ -1392,8 +1392,8 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
                       }}>DANGER ZONE</div>
                       <p style={{ margin: 0, fontSize: 14, lineHeight: '20px', color: 'var(--cth-ink-700)' }}>
                         Reset wipes the orchestrator's memories, the entire hive (every agent, message,
-                        task, and the board), the semantic-memory palace, and all settings -
-                        then takes you back to onboarding.
+                        task, and the board), and all settings - then takes you back to onboarding.
+                        (Your team's shared semantic memory in Supabase is not touched.)
                       </p>
                       <div>
                         <PixelButton variant="destructive" size="md" onClick={() => setConfirming(true)}>

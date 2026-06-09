@@ -41,7 +41,7 @@ import {
 } from './types';
 import { errMsg } from './io';
 import { pushAppendOnly } from './push';
-import { pushMemory, pullMemory } from './memory';
+import { pushMemory, pullMemory, matchMemoryChunks, recentMemoryChunks, type MemoryChunkHit } from './memory';
 import { pushState, pullStateOnce, subscribeState, listHiveOwners, fetchTeammateAgents, fetchTeammateTasks, type HiveOwner, type TeammateAgent } from './state';
 import * as auth from './auth';
 
@@ -57,6 +57,7 @@ export type {
   AppendPushCtx,
   MemorySyncCtx
 } from './types';
+export type { MemoryChunkHit } from './memory';
 
 /** Optional hooks the manager calls when a pull lands new mirror memory: ask the
  *  MemoryManager to re-mine, and push a fresh status to the renderer. Mirrors the
@@ -69,6 +70,10 @@ export interface SyncManagerDeps {
   emit?: (channel: string, payload: unknown) => void;
   requestMine?: () => void;
   hive?: HiveBridge;
+  /** Local Ollama embedder (memory/ollama.ts), wired in index.ts. When present,
+   *  the memory push also embeds each owned agent's memory.md into the shared
+   *  `memory_chunks` index. Absent = text-only memory sync (no embeddings). */
+  embed?: (texts: string[]) => Promise<number[][] | null>;
 }
 
 export class SyncManager {
@@ -390,6 +395,37 @@ export class SyncManager {
     } catch (e) { this.lastError = errMsg(e); return []; }
   }
 
+  // ─── shared semantic memory (Ollama embeddings + pgvector) ─────────────────
+
+  /** Is the shared semantic-memory store reachable (signed in + workspace set)?
+   *  The MemoryManager gates its search/wake-up on this — the store IS Supabase,
+   *  so semantic memory needs sync running, not just Ollama. */
+  canRunMemory(): boolean {
+    return this.canRun() && this.client !== null;
+  }
+
+  /** Cosine top-K recall across the whole workspace's memory. The query vector is
+   *  embedded locally (Ollama) by the caller; this just runs the RPC. Read-only,
+   *  gated on a signed-in client. Best-effort: []. */
+  async matchMemoryChunks(embedding: number[], k: number, agent?: string): Promise<MemoryChunkHit[]> {
+    if (!this.canRunMemory() || !this.client) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await matchMemoryChunks(this.client, s.workspaceId, embedding, k, agent);
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Most recently updated chunks across the workspace (backs wake-up). */
+  async recentMemoryChunks(k: number): Promise<MemoryChunkHit[]> {
+    if (!this.canRunMemory() || !this.client) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await recentMemoryChunks(this.client, s.workspaceId, k);
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
   /** Fetch a teammate's kanban (read-only) — same `{ tasks: [...] }` shape as
    *  hiveTasks(), so the renderer reuses its parser. */
   async teammateTasks(machineId: string): Promise<{ tasks: unknown[] }> {
@@ -495,7 +531,8 @@ export class SyncManager {
         try {
           const n = await pushMemory({
             client: this.client, store: this.store, workspaceId: s.workspaceId,
-            machineId, home, requestMine: this.deps.requestMine
+            machineId, home, requestMine: this.deps.requestMine,
+            embed: this.deps.embed, ownerLabel: this.auth.email ?? undefined
           });
           this.memory.pushed += n;
         } catch (e) { this.lastError = errMsg(e); }

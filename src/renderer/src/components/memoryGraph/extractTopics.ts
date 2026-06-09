@@ -6,8 +6,9 @@
 // mentioned by >= 2 distinct agents (shared knowledge is the interesting signal;
 // an agent's solo notes aren't a hive-wide "topic"). See MEMORY_GRAPH_SPEC.md §5.
 //
-// This is deliberately heuristic, not semantic — MemPalace (searchMemory) owns
-// the semantic side and returns ranked snippets per query, not an enumerable set.
+// This is deliberately heuristic, not semantic — the shared semantic memory
+// (searchMemory) owns the semantic side and returns ranked snippets per query,
+// not an enumerable set.
 
 export interface Topic {
   /** stable node id, e.g. "topic:landing page redesign" */

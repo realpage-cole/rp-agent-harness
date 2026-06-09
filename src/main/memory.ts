@@ -1,269 +1,176 @@
 /**
- * MemoryManager — semantic memory for the hive, backed by the MemPalace CLI.
+ * MemoryManager — shared semantic memory for the hive, backed by LOCAL Ollama
+ * embeddings + a Supabase pgvector index.
  *
- * CLI-only (no MCP): the harness keeps a single shared palace under harnessHome,
- * points every agent's `MEMPALACE_PALACE_PATH` at it, and mines each agent's
- * `memory.md` into its own wing so the whole team can recall by meaning via
- * `mempalace search` / `mempalace wake-up`. Degrades silently to no-op when the
- * `mempalace` CLI isn't installed — the markdown memory still works.
+ * Why not MemPalace: its embeddings are hardcoded to sentence-transformers/ONNX
+ * models fetched from HuggingFace, which the RealPage network policy blocks. So
+ * the harness embeds entirely LOCALLY via Ollama (`nomic-embed-text`) — nothing
+ * leaves the machine to produce a vector — and stores the vectors in the same
+ * Supabase project the team already syncs through. That makes recall a single
+ * SHARED layer across teammates, sessions, and projects (one workspace-scoped
+ * index), not a per-machine local rebuild.
  *
- *   init    : mempalace init <home> --yes --no-llm        (heuristics-only, no LLM)
- *   store   : mempalace mine <agentDir> --wing <id> --agent <id>
- *   recall  : mempalace search "<q>" --results N   /   mempalace wake-up
+ * Division of labor:
+ *   - WRITES: sync/memory.ts embeds each owned agent's memory.md (this manager's
+ *     Ollama embedder, injected as a dep) and upserts the chunks into
+ *     `memory_chunks` on the normal sync beat. Only sync/* ever touches Supabase.
+ *   - READS: this manager embeds a query/locally and asks the SyncManager (via the
+ *     injected MemoryVectorStore bridge) to run the cosine match RPC. The human
+ *     Memory panel is the window into it.
  *
- * Runs in the Electron main process.
+ * Because the store IS Supabase, semantic memory requires sync to be running +
+ * signed in (the `storeReady` gate). With sync off the markdown memory still
+ * works; there's just no shared semantic index. Degrades silently to no-op when
+ * Ollama is unreachable. Runs in the Electron main process.
  */
-import { existsSync, statSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { embedOne, ping, type OllamaSettings, type EmbedKind } from './memory/ollama';
+import type { MemoryChunkHit } from './sync';
 
-/** Non-memory files `mempalace mine` must not ingest: the Claude Code hooks
- *  config (a large JSON blob that swamps the wake-up digest), the cursor, and
- *  raw inbox/outbox message JSON. `mempalace mine` honors .gitignore, so we drop
- *  one in each agent dir rather than touch the mine command. */
-const MINE_IGNORE_LINES = ['settings.json', 'cursor.json', 'inbox/', 'outbox/'];
-
-/** Idempotently ensure `<agentDir>/.gitignore` excludes the non-memory files.
- *  Writes only the missing lines (append-only) so it's safe to call every cycle. */
-function ensureMineIgnore(agentDir: string): void {
-  const path = join(agentDir, '.gitignore');
-  let existing = '';
-  try { if (existsSync(path)) existing = readFileSync(path, 'utf8'); } catch { return; }
-  const have = new Set(existing.split('\n').map((l) => l.trim()));
-  const missing = MINE_IGNORE_LINES.filter((l) => !have.has(l));
-  if (missing.length === 0) return; // already covered — don't rewrite every cycle
-  const prefix = existing && !existing.endsWith('\n') ? existing + '\n' : existing;
-  try { writeFileSync(path, prefix + missing.join('\n') + '\n', 'utf8'); } catch { /* best-effort */ }
+export interface MemorySettings extends OllamaSettings {
+  /** User master toggle (config.semanticMemory). */
+  enabled: boolean;
 }
 
-export type EmbeddingModel = 'minilm' | 'embeddinggemma';
-
-export interface MemorySettings {
-  enabled: boolean;
-  model: EmbeddingModel;
+/**
+ * The read seam into the shared vector store — implemented by the SyncManager
+ * (the only module that talks to Supabase), wired in index.ts. Keeps this manager
+ * free of any Supabase import and unit-testable with a fake store.
+ */
+export interface MemoryVectorStore {
+  /** Is the shared store reachable (sync running + signed in + workspace set)? */
+  canRun(): boolean;
+  /** Cosine top-K over the whole workspace's memory for a locally-embedded query. */
+  match(embedding: number[], k: number, agent?: string): Promise<MemoryChunkHit[]>;
+  /** Most recently updated chunks across the workspace (the wake-up digest). */
+  recent(k: number): Promise<MemoryChunkHit[]>;
 }
 
 export interface MemoryStatus {
-  available: boolean;        // mempalace CLI found on PATH
-  enabled: boolean;          // user setting
-  active: boolean;           // available && enabled && have a home
-  initialized: boolean;      // palace directory exists
-  palacePath: string | null;
-  model: EmbeddingModel;
-  bin: string | null;
+  /** Ollama reachable AND the embedding model pulled. */
+  available: boolean;
+  /** User setting (config.semanticMemory). */
+  enabled: boolean;
+  /** The shared Supabase store is up (sync running + signed in). */
+  storeReady: boolean;
+  /** available && enabled && storeReady — semantic memory is fully working. */
+  active: boolean;
+  /** Where we reach Ollama + which model — surfaced so the panel can guide setup. */
+  host: string;
+  model: string;
 }
 
-const MINE_INTERVAL_MS = 180_000; // re-mine changed memories every 3 min
+/** How long a reachability probe is trusted before re-pinging (status is polled). */
+const PING_TTL_MS = 15_000;
+/** Default recall breadth. */
+const DEFAULT_RESULTS = 8;
 
 export class MemoryManager {
-  private binCache: string | null | undefined;
-  private mineTimer: NodeJS.Timeout | null = null;
-  private initStarted = false;
-  /** True while a mineNow() pass is in flight — serializes palace writers. */
-  private mining = false;
-  /** agentDir (absolute path) → memory.md mtimeMs at last successful mine (skip
-   *  unchanged). Keyed by full path so the own (`agents/<id>`) and mirrored
-   *  (`mirror/agents/<id>`) copies of one agent never collide. */
-  private lastMined = new Map<string, number>();
+  private pingCache: { at: number; ok: boolean } | null = null;
 
   constructor(
-    private getHome: () => string | null,
-    private getSettings: () => MemorySettings
+    private getSettings: () => MemorySettings,
+    private store: MemoryVectorStore
   ) {}
 
-  palacePath(): string | null {
-    const h = this.getHome();
-    return h ? join(h, 'palace') : null;
-  }
+  // — config gates —
 
-  /** Resolve the mempalace CLI against the user's PATH + common uv/pip spots. */
-  bin(): string | null {
-    if (this.binCache !== undefined) return this.binCache;
-    let found: string | null = null;
-    const isWin = process.platform === 'win32';
-    // 1) Ask the shell/PATH resolver. Windows has no POSIX shell + uses `where`
-    //    and a `.exe` suffix; everything else goes through the login shell.
-    try {
-      if (isWin) {
-        const res = spawnSync('where', ['mempalace'], { encoding: 'utf8', timeout: 3000 });
-        const p = res.stdout.trim().split(/\r?\n/)[0]?.trim();
-        if (p && existsSync(p)) found = p;
-      } else {
-        const res = spawnSync(process.env.SHELL ?? '/bin/zsh', ['-ilc', 'which mempalace'], {
-          encoding: 'utf8', timeout: 3000
-        });
-        const p = res.stdout.trim().split('\n').pop();
-        if (p && existsSync(p)) found = p;
-      }
-    } catch { /* fall through */ }
-    // 2) Probe common install locations (uv tool / homebrew / pip).
-    if (!found) {
-      const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-      const candidates = isWin
-        ? [
-            join(home, '.local', 'bin', 'mempalace.exe'),
-            join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Python', 'Scripts', 'mempalace.exe')
-          ]
-        : [
-            `${home}/.local/bin/mempalace`,
-            '/opt/homebrew/bin/mempalace',
-            '/usr/local/bin/mempalace'
-          ];
-      for (const c of candidates) if (c && existsSync(c)) { found = c; break; }
-    }
-    this.binCache = found;
-    return found;
-  }
-  /** Force re-resolution (e.g. after the user installs mempalace). */
-  resetBinCache(): void { this.binCache = undefined; }
-
-  available(): boolean { return this.bin() !== null; }
   enabled(): boolean { return this.getSettings().enabled; }
-  active(): boolean { return this.available() && this.enabled() && this.getHome() !== null; }
-  model(): EmbeddingModel { return this.getSettings().model === 'embeddinggemma' ? 'embeddinggemma' : 'minilm'; }
 
-  status(): MemoryStatus {
-    const palace = this.palacePath();
+  /** Sync best-effort "semantic memory is configured + the store is up" — used at
+   *  agent spawn (must not await a network ping). Doesn't prove Ollama is up; the
+   *  embed step degrades to no-op if it isn't. */
+  configured(): boolean {
+    return this.getSettings().enabled && this.store.canRun();
+  }
+
+  /** Cached Ollama reachability probe (TTL'd so status polling doesn't hammer it). */
+  private async reachable(): Promise<boolean> {
+    const now = Date.now();
+    if (this.pingCache && now - this.pingCache.at < PING_TTL_MS) return this.pingCache.ok;
+    const ok = await ping(this.getSettings());
+    this.pingCache = { at: now, ok };
+    return ok;
+  }
+
+  /** Drop the cached probe so the next status() re-checks immediately (e.g. after
+   *  the user starts Ollama or pulls the model). */
+  resetProbe(): void { this.pingCache = null; }
+
+  async status(): Promise<MemoryStatus> {
+    const s = this.getSettings();
+    const available = await this.reachable();
+    const storeReady = this.store.canRun();
     return {
-      available: this.available(),
-      enabled: this.enabled(),
-      active: this.active(),
-      initialized: !!palace && existsSync(palace),
-      palacePath: palace,
-      model: this.model(),
-      bin: this.bin()
+      available,
+      enabled: s.enabled,
+      storeReady,
+      active: available && s.enabled && storeReady,
+      host: s.host,
+      model: s.model
     };
   }
 
-  /** Env merged into each agent's spawn so its `mempalace` CLI hits the shared palace. */
-  env(): Record<string, string> {
-    const palace = this.palacePath();
-    if (!this.active() || !palace) return {};
-    return { MEMPALACE_PALACE_PATH: palace, MEMPALACE_EMBEDDING_MODEL: this.model() };
-  }
+  // — lifecycle (kept as thin hooks so index.ts wiring is unchanged) —
 
-  private childEnv(): NodeJS.ProcessEnv {
-    return {
-      ...process.env,
-      MEMPALACE_PALACE_PATH: this.palacePath() ?? '',
-      MEMPALACE_EMBEDDING_MODEL: this.model()
-    };
-  }
+  /** Warm the reachability probe so the first status() is instant. No loops: the
+   *  embedding WRITES ride the sync beat (sync/memory.ts); there's no local mine. */
+  start(): void { void this.reachable(); }
+  stop(): void { /* nothing to tear down — no timers, no child processes */ }
 
-  // — lifecycle —
-
-  /** Start the mine loop. `mempalace mine` auto-creates the palace on first run
-   *  (lazily downloading the embedding model, one-time). We deliberately do NOT
-   *  run `mempalace init`: it ends in an interactive "Mine now? [Y/n]" prompt
-   *  that --yes doesn't cover, so a spawned child would hang forever. */
-  start(): void {
-    if (!this.active() || this.initStarted) return;
-    if (!this.bin() || !this.getHome() || !this.palacePath()) return;
-    this.initStarted = true;
-    this.startMineLoop();
-  }
-
-  stop(): void {
-    if (this.mineTimer) { clearInterval(this.mineTimer); this.mineTimer = null; }
-  }
-
-  private startMineLoop(): void {
-    if (this.mineTimer) return;
-    this.mineNow();
-    this.mineTimer = setInterval(() => this.mineNow(), MINE_INTERVAL_MS);
-  }
-
-  // — mining (store) —
-
-  /** Mine every agent whose memory changed since last time, one at a time.
-   *  The palace permits a single writer, so mines MUST be serialized — firing
-   *  them concurrently makes all but one fail with "held by another writer".
-   *  `mining` guards against a slow pass overlapping the next interval tick.
-   *
-   *  Two source trees are mined, both serialized under the same `mining` guard:
-   *    - `hive/agents/<id>`        — this machine's OWN agents.
-   *    - `hive/mirror/agents/<id>` — teammates' memory pulled in by SyncManager
-   *      (Phase 2). Mining these makes the whole team recallable locally. Pull
-   *      writes ONLY the mirror tree and push scans ONLY the agents tree, so the
-   *      two are disjoint and can't echo. */
-  async mineNow(): Promise<void> {
-    const home = this.getHome();
-    const bin = this.bin();
-    if (!this.active() || !home || !bin) return;
-    if (this.mining) return; // a previous pass is still running — let it finish
-    this.mining = true;
-    try {
-      await this.mineTree(join(home, 'hive', 'agents'));
-      await this.mineTree(join(home, 'hive', 'mirror', 'agents'));
-    } finally {
-      this.mining = false;
-    }
-  }
-
-  /** Mine every agent under one source tree whose memory.md changed since the
-   *  last pass, one writer at a time. The caller holds the `mining` guard across
-   *  all trees so the single-writer palace is never contended. The `lastMined`
-   *  mtime cache is keyed by the full agentDir path, so an `agents/<id>` and a
-   *  `mirror/agents/<id>` of the same id never collide. */
-  private async mineTree(agentsDir: string): Promise<void> {
-    if (!existsSync(agentsDir)) return;
-    let ids: string[];
-    try { ids = readdirSync(agentsDir); } catch { return; }
-    for (const id of ids) {
-      const agentDir = join(agentsDir, id);
-      const mem = join(agentDir, 'memory.md');
-      if (!existsSync(mem)) continue;
-      let mtime = 0;
-      try { mtime = statSync(mem).mtimeMs; } catch { continue; }
-      if (this.lastMined.get(agentDir) === mtime) continue; // unchanged — skip the model load
-      this.lastMined.set(agentDir, mtime);
-      await this.mineAgent(agentDir, id); // one writer at a time
-    }
-  }
-
-  private mineAgent(agentDir: string, id: string): Promise<void> {
-    return new Promise((resolve) => {
-      const bin = this.bin();
-      if (!bin) { resolve(); return; }
-      ensureMineIgnore(agentDir); // keep settings.json / cursor / messages out of the index
-      // stdin closed (mempalace can prompt); mempalace dedups so re-mining is safe.
-      const proc = spawn(bin, ['mine', agentDir, '--wing', id, '--agent', id], {
-        env: this.childEnv(), stdio: ['ignore', 'ignore', 'pipe']
-      });
-      let err = '';
-      proc.stderr?.on('data', (d) => { err += d.toString(); });
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          console.error(`[memory] mine ${id} exited ${code}: ${err.slice(-300)}`);
-          this.lastMined.delete(agentDir); // let the next tick retry
-        }
-        resolve();
-      });
-      proc.on('error', () => { this.lastMined.delete(agentDir); resolve(); });
-    });
-  }
+  /** Extra env merged into spawns / the reflector's headless Claude. Empty now:
+   *  agents have no embedding CLI (embedding is harness-side via Ollama). Retained
+   *  so the reflector wiring (which merges this) stays put. */
+  env(): Record<string, string> { return {}; }
 
   // — recall (read) —
 
-  /** Semantic search across the shared palace. Returns the CLI's text output. */
-  search(query: string, opts: { wing?: string; results?: number } = {}): { ok: boolean; output: string; error?: string } {
-    const bin = this.bin();
-    if (!this.active() || !bin) return { ok: false, output: '', error: 'semantic memory not active' };
-    const args = ['search', query, '--results', String(opts.results ?? 5)];
-    if (opts.wing) args.push('--wing', opts.wing);
-    const res = spawnSync(bin, args, { env: this.childEnv(), encoding: 'utf8', timeout: 120_000, input: '' });
-    if (res.status !== 0) return { ok: false, output: res.stdout ?? '', error: (res.stderr || 'search failed').trim() };
-    return { ok: true, output: res.stdout ?? '' };
+  /** Semantic search across the shared workspace memory. Embeds the query LOCALLY
+   *  (Ollama, query-kind prefix), then runs the cosine match RPC. Returns the
+   *  formatted hits as text for the panel. */
+  async search(
+    query: string,
+    opts: { wing?: string; results?: number } = {}
+  ): Promise<{ ok: boolean; output: string; error?: string }> {
+    const gate = this.gate();
+    if (gate) return { ok: false, output: '', error: gate };
+    const embedding = await this.embedQuery(query);
+    if (!embedding) return { ok: false, output: '', error: "couldn't reach Ollama to embed the query" };
+    const hits = await this.store.match(embedding, opts.results ?? DEFAULT_RESULTS, opts.wing);
+    return { ok: true, output: formatHits(hits) };
   }
 
-  /** Session-start digest (~600-900 tokens). */
-  wakeUp(wing?: string): { ok: boolean; output: string; error?: string } {
-    const bin = this.bin();
-    if (!this.active() || !bin) return { ok: false, output: '', error: 'semantic memory not active' };
-    const args = ['wake-up'];
-    if (wing) args.push('--wing', wing);
-    const res = spawnSync(bin, args, { env: this.childEnv(), encoding: 'utf8', timeout: 120_000, input: '' });
-    if (res.status !== 0) return { ok: false, output: res.stdout ?? '', error: (res.stderr || 'wake-up failed').trim() };
-    return { ok: true, output: res.stdout ?? '' };
+  /** Session-start digest: the most recently updated memory across the team. */
+  async wakeUp(_wing?: string): Promise<{ ok: boolean; output: string; error?: string }> {
+    const gate = this.gate();
+    if (gate) return { ok: false, output: '', error: gate };
+    const hits = await this.store.recent(DEFAULT_RESULTS);
+    return { ok: true, output: formatHits(hits) };
   }
+
+  /** Embed a query string for recall (or null if Ollama is unreachable). */
+  private async embedQuery(text: string, kind: EmbedKind = 'query'): Promise<number[] | null> {
+    return embedOne(text, this.getSettings(), kind);
+  }
+
+  /** Why recall can't run right now (or null when it can). */
+  private gate(): string | null {
+    const s = this.getSettings();
+    if (!s.enabled) return 'semantic memory is turned off';
+    if (!this.store.canRun()) return 'shared memory needs team sync turned on and signed in';
+    return null;
+  }
+}
+
+/** Render recall hits as a readable text block for the Memory panel. Each hit is
+ *  the owning agent (+ owner + match score) above its memory snippet. */
+function formatHits(hits: MemoryChunkHit[]): string {
+  if (hits.length === 0) return '';
+  return hits
+    .map((h) => {
+      const who = h.name || h.agentId || 'agent';
+      const owner = h.ownerLabel ? ` · ${h.ownerLabel}` : '';
+      const score = h.similarity != null ? ` (${Math.round(h.similarity * 100)}%)` : '';
+      return `▸ ${who}${owner}${score}\n${h.content.trim()}`;
+    })
+    .join('\n\n');
 }

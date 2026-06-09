@@ -2,6 +2,8 @@
 
 **A local multi-agent harness for [Claude Code](https://claude.com/claude-code).** `rp-agent-harness` is an internal RealPage desktop app (Electron + React + TypeScript) that turns the `claude` CLI sessions you already run in your terminal into a self-coordinating team. Each agent runs as a real Claude Code process in a pseudo-terminal, gets long-term memory and a mailbox, and is coordinated by a **god orchestrator agent** you talk to. A modern Hive dashboard shows the agent roster, a live activity feed, a task board, and a "needs you" queue for the items that require your input. Everything is local-first; an optional Supabase layer lets teammates share long-term memory and a team blackboard, and view each other's roster + task board read-only.
 
+> 🚀 **Just cloned this and want it running?** Start with **[GET-SETUP.md](GET-SETUP.md)** — a guided, copy-paste setup with separate **macOS** and **Windows** tracks (including the one-time RealPage corporate-network cert step). This README is the reference; that's the on-ramp.
+
 ## Table of contents
 
 - [What it is](#what-it-is)
@@ -38,7 +40,7 @@ It is local-first by design: everything runs on your machine and works fully off
 - **Orchestrator + hive coordination.** The on-disk "hive" is a single-committer, git-backed coordination layer: per-agent identity and long-term memory, atomic-file mailboxes (`outbox/` → routed into `inbox/`), a shared blackboard, and an append-only event log. A god orchestrator agent (id `god`, role `orchestrator`) adjudicates traffic, routes and assigns tasks, and parks human-blocking items in a "needs you" queue. No agent ever touches git directly, which avoids `.git/index.lock` corruption.
 - **Modern Hive dashboard.** The main view composes an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" banner, with quick-nav into the Command Center tabs (Tasks, Schedules, Needs you). All bindings — tasks, human queue, messages, agent status — are real, live data.
 - **Optional Supabase collaborative sync.** Off by default. When enabled, Supabase becomes a shared "upstream" the local hive never had: an append-only mirror of the event log, cost ledger, and command history; two-way agent-memory sync; a **shared team blackboard**; and **per-owner roster + kanban** — your hive stays your own (your orchestrator only manages your agents), and a unified **Viewing** toggle switches the dashboard to a teammate's roster + board read-only. It runs entirely in the Electron main process and is layered on top of the local hive — local files under `<harnessHome>/hive/` stay the source of truth and the app remains fully functional offline. Backed by Supabase Auth (email/password), Row-Level Security, and workspaces; migrations live in `supabase/migrations/`.
-- **Optional semantic memory.** Long-term agent memory is markdown-first and works on its own. When the `mempalace` CLI is on your `PATH`, the harness mines each agent's `memory.md` into a shared semantic "palace" for instant cross-session recall, searchable from the UI. It degrades silently to a no-op when the CLI isn't installed.
+- **Shared semantic memory (local embeddings).** Long-term agent memory is markdown-first and works on its own. On top of that, durable facts in every agent's `memory.md` are embedded — **locally, via [Ollama](https://ollama.com) (`nomic-embed-text`)**, because RealPage's network policy blocks the usual HuggingFace model downloads — and the vectors are stored in the team's **Supabase `pgvector`** index. The result is one shared semantic memory across teammates, sessions, and projects: search it by meaning from the UI, and the more the team records, the better future sessions get. This is the living/breathing layer of the harness. It degrades silently to a no-op when Ollama isn't running or sync is off (plain markdown memory still works).
 - **Durability and control.** A SQLite-backed durable store (window bounds + history) and a durable cost ledger that survive restarts; a cost/runaway circuit breaker (steer → constrain → stop); per-agent token budgets and real token/cost telemetry read from `~/.claude/projects/` transcripts; live OpenTelemetry-based observability; a memory-condensation reflector; optional per-agent git worktree isolation; recurring scheduled missions (an hourly ops standup ships enabled); GitHub issue/CI ingestion via the `gh` CLI; and desktop notifications.
 
 ## Requirements
@@ -49,10 +51,12 @@ It is local-first by design: everything runs on your machine and works fully off
   ```bash
   xcode-select --install
   ```
-- *Optional:* the `mempalace` CLI for semantic cross-session recall (the app works without it — markdown memory still functions).
+- *Optional:* [Ollama](https://ollama.com) running locally with the embedding model pulled (`ollama pull nomic-embed-text`), for shared semantic memory. HuggingFace model downloads are blocked on the RealPage network, so embeddings run entirely through local Ollama — nothing leaves your machine to produce a vector. The app works without it; markdown memory still functions.
 - *Optional:* a Supabase project (URL + anon/publishable key + workspace) for collaborative team sync, configured in the app's settings.
 
 ## Install
+
+> Prefer a guided, OS-specific walkthrough? **[GET-SETUP.md](GET-SETUP.md)** has full **macOS** and **Windows** tracks. The steps below are the reference (macOS commands shown).
 
 ### RealPage corporate network setup
 
@@ -114,7 +118,7 @@ npm run dist:linux # Linux AppImage (x64)
 
 ### Three Electron processes
 
-- **Main (Node).** Owns everything privileged: it spawns each agent as a `node-pty` child and streams its output over per-id IPC, runs the Hive coordination layer (`src/main/hive.ts`), hosts the hook server that agents call back into (`src/main/hooks.ts`), wraps the optional semantic-memory CLI (`src/main/memory.ts`), and drives the optional Supabase sync (`src/main/sync/*`).
+- **Main (Node).** Owns everything privileged: it spawns each agent as a `node-pty` child and streams its output over per-id IPC, runs the Hive coordination layer (`src/main/hive.ts`), hosts the hook server that agents call back into (`src/main/hooks.ts`), runs the shared semantic-memory layer (local Ollama embeddings in `src/main/memory/ollama.ts`, read/searched via `src/main/memory.ts`), and drives the optional Supabase sync (`src/main/sync/*`).
 - **Preload.** A thin `contextBridge` that exposes a single typed `window.cth` API to the renderer (`src/preload/index.ts`). The renderer never touches Node, IPC channels, the filesystem, or git directly — only this bridge.
 - **Renderer (React).** The modern **Hive dashboard** (`src/renderer/src/components/dashboard/*`): an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" queue for items waiting on a human. It also hosts the per-agent terminals (xterm.js over the PTY bytes). It is a pure view over state the main process owns.
 
@@ -164,7 +168,7 @@ Autonomy comes from a `Stop` hook: when an agent finishes a turn, the hook check
 ### Memory
 
 - **Markdown first (always on).** Every agent has a `memory.md` it reads at the start of a task and appends to as it learns, plus the shared `board.md`. This is the durable memory of the team and needs nothing beyond the filesystem.
-- **Semantic memory (optional).** `src/main/memory.ts` wraps the **MemPalace** CLI. When enabled, the harness keeps one shared "palace" under `harnessHome`, points every agent's `MEMPALACE_PALACE_PATH` at it, and mines each agent's `memory.md` into its own wing so the whole team can recall by meaning (`mempalace search`, `mempalace wake-up`). Embeddings run locally via a downloaded sentence-transformers model — `minilm` (light, the default) or the multilingual `embeddinggemma`, fetched on first run. This layer is entirely optional: if `mempalace` isn't installed, or the setting is left off, it degrades to a silent no-op and plain markdown memory still works.
+- **Shared semantic memory (Ollama + pgvector).** On top of the markdown, durable facts are made recallable *by meaning* across the whole team. Each agent's `memory.md` is chunked and embedded **locally via Ollama** (`nomic-embed-text`, 768-dim) — nothing leaves the machine to produce a vector — and the chunks are upserted into a workspace-scoped **Supabase `pgvector`** table (`memory_chunks`). Search embeds your query locally too, then runs a cosine top-K (the `match_memory_chunks` RPC) across the entire team's memory. **Why not the usual sentence-transformers / MemPalace path?** Those models are fetched from HuggingFace, which the RealPage network blocks — so the harness embeds through local Ollama instead. This is the living/breathing layer of the harness: the more the team writes to memory, the smarter recall gets over time. Embedding **writes** ride the Supabase sync beat (`src/main/sync/memory.ts`); **reads** (search / wake-up) go through `src/main/memory.ts` and the Memory panel. Because the index lives in Supabase, semantic memory needs sync on + signed in; markdown memory always works regardless, and embedding degrades to a silent no-op when Ollama is unreachable.
 
 ## The dashboard
 
@@ -189,7 +193,8 @@ When enabled, a `SyncManager` running in the Electron **main process** (the work
   - `<hive>/log.jsonl` → `public.hive_log`
   - `<hive>/cost-ledger.jsonl` → `public.cost_ledger`
   - the SQLite `command_history` table → `public.command_history`
-- **Per-agent memory (two-way).** Each owned agent's `<hive>/agents/<id>/memory.md` is hashed and pushed to `public.agent_memory` (keyed on `workspace_id, agent_id`) when it changes. Teammates' rows are pulled into `<hive>/mirror/agents/<id>/memory.md` and re-mined into the local memory graph. Push scans `agents/`, pull writes `mirror/agents/` — disjoint paths, so there's no echo loop. One agent lives on one machine, so there's no merge: last-write-wins by `updated_at`.
+- **Per-agent memory (two-way).** Each owned agent's `<hive>/agents/<id>/memory.md` is hashed and pushed to `public.agent_memory` (keyed on `workspace_id, agent_id`) when it changes. Teammates' rows are pulled into `<hive>/mirror/agents/<id>/memory.md`. Push scans `agents/`, pull writes `mirror/agents/` — disjoint paths, so there's no echo loop. One agent lives on one machine, so there's no merge: last-write-wins by `updated_at`. (The markdown body is the source of truth; the semantic index below is derived from it.)
+- **Shared semantic memory (embeddings).** On the same push pass, when an owned agent's `memory.md` changes it is chunked, embedded **locally via Ollama** (`nomic-embed-text`), and the vectors are upserted into `public.memory_chunks` (keyed per `workspace_id, machine_id, agent_id, chunk_id`, membership-scoped RLS). Recall is a cosine top-K over the whole workspace via the `match_memory_chunks` RPC — so a query you run locally is answered from *everyone's* memory. A separate per-agent embed cursor means an Ollama outage never blocks text sync (and vice versa); each retries independently. HuggingFace is network-blocked, so embeddings are local-only by design.
 - **Per-owner roster & kanban (push-only).** Your roster (`registry.json` → `public.agents`) and task kanban (`tasks.json` → `public.tasks`) are pushed up tagged with your machine id + owner label, but a teammate's are **never merged into your local hive** — your board stays yours and your orchestrator only manages your own agents. Both tables are keyed per machine (`workspace_id, machine_id, …`) so teammates' hives can't collide (notably every orchestrator is `agent_id='god'`). A teammate's roster + kanban are viewed **read-only, on demand** via the dashboard's **Viewing** toggle (`listHiveOwners` / `teammateAgents` / `teammateTasks`).
 - **Shared blackboard (live, two-way).** Only `board.md` (→ `public.board`, one row per workspace) is genuinely shared. It syncs across machines via **Supabase Realtime** (`postgres_changes`) backed by the 30s catch-up poll, **last-writer-wins by `updated_at`**. It's the team's single coordination surface, with the orchestrator as its sole scribe.
 
@@ -201,13 +206,13 @@ Sync is gated on **Supabase Auth (email/password)** and a **workspace**:
 
 - `public.workspaces` (one row per team) and `public.workspace_members` (which users belong to which workspace).
 - A `SECURITY DEFINER` helper `is_workspace_member(ws)` that every data table's RLS consults; `EXECUTE` on it is granted to authenticated users only.
-- Every data table is **authenticated-only and membership-scoped**: a row is readable/writable only by signed-in members of its workspace. Deletes are denied everywhere (append-only / additive by construction).
+- Every data table is **authenticated-only and membership-scoped**: a row is readable/writable only by signed-in members of its workspace. Deletes are denied on the append-only / additive tables; `memory_chunks` is the one exception — a member may delete-then-reinsert their own chunks when an agent's memory is re-embedded.
 
 There are two clients in the main process: a dedicated **auth client** (`signInWithPassword` / `setSession` / `signOut`) and a **data client** built with an `accessToken` callback so every DB call carries the session token and RLS sees `auth.uid()`. The session (access + refresh tokens) lives **only** in the main process and the local kv store — it never crosses IPC; the renderer only ever sees a tokenless snapshot (signed in or not, and who). A returning user's session is restored on launch, so sync arms immediately.
 
 ### Setup
 
-1. **Apply the schema.** Point the project at a Supabase project (`supabase/config.toml` carries the public `project_id`), then apply the migrations in `supabase/migrations/` — via `supabase db push`, the Supabase SQL editor, or the GitHub integration. They run in order: append-only mirror → agent memory → shared state → auth + RLS, then the RLS hardening/fix and per-owner-key migrations.
+1. **Apply the schema.** Point the project at a Supabase project (`supabase/config.toml` carries the public `project_id`), then apply the migrations in `supabase/migrations/` — via `supabase db push`, the Supabase SQL editor, or the GitHub integration. They run in order: append-only mirror → agent memory → shared state → auth + RLS, then the RLS hardening/fix, per-owner-key, and shared-semantic-memory (`pgvector` + `memory_chunks` + `match_memory_chunks`) migrations. The last one enables the `vector` extension; no extra setup beyond that.
 2. **Enable Email auth and create a user.** In the Supabase dashboard, turn on the Email auth provider and create at least one user (or allow sign-ups) — there's no in-app sign-up; the harness signs in an existing account.
 3. **Configure the harness.** Open **Settings → Sync**. Toggle sync on, paste your **Supabase URL** and **anon key** (Supabase project → Settings → API).
 4. **Sign in.** Enter your email + password and click **sign in**.

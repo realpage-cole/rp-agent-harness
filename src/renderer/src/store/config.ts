@@ -48,7 +48,8 @@ export interface HarnessConfig {
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;
   semanticMemory: boolean;
-  embeddingModel: 'minilm' | 'embeddinggemma';
+  ollamaHost?: string;
+  ollamaEmbedModel?: string;
   missions?: ScheduledMission[];
   opsStandupSeeded?: boolean;
   heartbeatSeeded?: boolean;
