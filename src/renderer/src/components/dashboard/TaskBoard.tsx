@@ -1,7 +1,7 @@
 import { useStore } from '@/store/store';
 import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
-import { useHiveTasks, type DashboardTask, type TaskStatus } from '@/hooks/useHiveTasks';
+import { useHiveTasks, useTeammateTasks, type DashboardTask, type TaskStatus } from '@/hooks/useHiveTasks';
 
 /** Column order + presentation. Colors reuse the status taxonomy semantics:
  *  blocked = needs attention (coral), done = success (mint). */
@@ -13,16 +13,24 @@ const COLUMNS: Array<{ status: TaskStatus; label: string; accent: string }> = [
 ];
 
 /**
- * Kanban view of the hive ledger: todo / doing / blocked / done columns from
- * `useHiveTasks`. The header and any card open the Command Center's tasks tab
- * (via requestCommandCenterTab) — the equivalent of clicking the old office
- * cork boards. Assignee ids are resolved to names from the store.
+ * Kanban view of the hive ledger. Driven by the shared view toggle (store
+ * `viewedOwner`): your own board (local hive's tasks.json via useHiveTasks) by
+ * default, or a teammate's board fetched READ-ONLY from Supabase when one is
+ * selected — the same selection that switches the roster, so they move together.
+ * Your local board is never polluted with a teammate's tasks. The header / cards
+ * open the local Command Center tasks tab only while viewing your own board.
  */
 export function TaskBoard() {
-  const { grouped, loaded } = useHiveTasks();
+  const viewedOwner = useStore((s) => s.viewedOwner);
+  const mine = useHiveTasks();
+  const teammate = useTeammateTasks(viewedOwner ? viewedOwner.machineId : null);
+  const { grouped, loaded } = viewedOwner ? teammate : mine;
+  const viewingTeammate = viewedOwner !== null;
+
   const agents = useStore((s) => s.agents);
   const requestCommandCenterTab = useStore((s) => s.requestCommandCenterTab);
-  const openTasks = () => requestCommandCenterTab('tasks');
+  // Only your own board navigates to the (local) Command Center tasks tab.
+  const openTasks = viewingTeammate ? undefined : () => requestCommandCenterTab('tasks');
 
   const nameFor = (id?: string): string | undefined =>
     id ? (agents.find((a) => a.id === id)?.name ?? id) : undefined;
@@ -32,8 +40,12 @@ export function TaskBoard() {
       title="TASKS"
       style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}
     >
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-        <PixelButton size="sm" variant="ghost" onClick={openTasks}>Open tasks →</PixelButton>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8 }}>
+        {viewingTeammate ? (
+          <span style={{ fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-300)' }}>read-only</span>
+        ) : (
+          <PixelButton size="sm" variant="ghost" onClick={openTasks}>Open tasks →</PixelButton>
+        )}
       </div>
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8,
@@ -47,7 +59,7 @@ export function TaskBoard() {
                 onClick={openTasks}
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
-                  border: 'none', cursor: 'pointer', textAlign: 'left',
+                  border: 'none', cursor: viewingTeammate ? 'default' : 'pointer', textAlign: 'left',
                   padding: '4px 8px',
                   background: 'var(--cth-cream-200)',
                   boxShadow: `inset 0 -2px 0 ${col.accent}`,
@@ -69,7 +81,7 @@ export function TaskBoard() {
                       onClick={openTasks}
                       title={t.title}
                       style={{
-                        textAlign: 'left', cursor: 'pointer', border: 'none',
+                        textAlign: 'left', cursor: viewingTeammate ? 'default' : 'pointer', border: 'none',
                         padding: 6, borderRadius: 4,
                         background: 'var(--cth-cream-100)',
                         boxShadow: `inset 0 0 0 1px var(--cth-ink-100), inset 3px 0 0 ${col.accent}`

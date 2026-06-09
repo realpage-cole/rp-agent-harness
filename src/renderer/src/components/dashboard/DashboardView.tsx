@@ -4,6 +4,7 @@ import { AgentRoster } from './AgentRoster';
 import { ActivityFeed } from './ActivityFeed';
 import { TaskBoard } from './TaskBoard';
 import { NeedsYouBanner } from './NeedsYouBanner';
+import { HiveViewSelector } from './HiveViewSelector';
 
 /**
  * The main pane: a modern dashboard composing the roster, task board, activity
@@ -23,15 +24,20 @@ export function DashboardView() {
     }}>
       {/* Quick navigation into the Command Center — the dashboard's equivalent
           of clicking office scene props (calendar/boards/ASK ME). */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
         <span style={{
           fontFamily: 'var(--cth-font-display)',
           fontSize: 'var(--cth-text-display-md)',
-          color: 'var(--cth-ink-900)', marginRight: 'auto'
+          color: 'var(--cth-ink-900)'
         }}>HIVE</span>
-        <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('tasks')}>Tasks</PixelButton>
-        <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('schedules')}>Schedules</PixelButton>
-        <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('human')}>Needs you</PixelButton>
+        {/* Unified view toggle — switches roster + kanban between your hive and a
+            teammate's (read-only) together. */}
+        <HiveViewSelector />
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('tasks')}>Tasks</PixelButton>
+          <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('schedules')}>Schedules</PixelButton>
+          <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('human')}>Needs you</PixelButton>
+        </div>
       </div>
 
       <NeedsYouBanner />

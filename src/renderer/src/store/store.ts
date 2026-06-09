@@ -148,6 +148,11 @@ interface State {
    *  task link → 'tasks'). `seq` makes repeated identical requests distinct. */
   ccTabRequest: { tab: string; seq: number } | null;
   requestCommandCenterTab: (tab: string) => void;
+  /** The hive currently being VIEWED in the dashboard: null = your own (local),
+   *  else a teammate's {machineId, ownerLabel}. ONE shared selection drives the
+   *  roster + kanban together (read-only for a teammate). Ephemeral — not persisted. */
+  viewedOwner: { machineId: string; ownerLabel: string | null } | null;
+  setViewedOwner: (owner: { machineId: string; ownerLabel: string | null } | null) => void;
   /** The task whose detail overlay is open (rendered app-wide — the card content
    *  grows: contracts, deps, the human Q&A trail). */
   taskDetailId: string | null;
@@ -361,6 +366,8 @@ export const useStore = create<State>((set) => ({
   ccTabRequest: null,
   requestCommandCenterTab: (tab) =>
     set((s) => ({ ccTabRequest: { tab, seq: (s.ccTabRequest?.seq ?? 0) + 1 } })),
+  viewedOwner: null,
+  setViewedOwner: (owner) => set({ viewedOwner: owner }),
   fullscreenAgentId: null,
   fullscreenFilePath: null,
   sidebarWidth: initialSidebarWidth,

@@ -779,7 +779,7 @@ function TokenLimitEditor({ value, onSet }: { value?: number; onSet: (tokens: nu
   );
 }
 
-// ─── Activity tab — hive event log + board ───────────────────────────────────
+// ─── Activity tab — hive event log + the shared blackboard ───────────────────
 
 interface LogEntry { ts?: number; kind?: string; [k: string]: unknown }
 
@@ -821,8 +821,9 @@ function ActivityTab() {
         ))}
       </Section>
 
-      <Section title="BOARD">
-        <Pre>{board || 'The board is empty.'}</Pre>
+      <Section title="BLACKBOARD">
+        <Muted>Shared across everyone in this workspace — the one team board (your roster &amp; kanban are per-person).</Muted>
+        <Pre>{board || 'The blackboard is empty.'}</Pre>
       </Section>
     </Scroll>
   );

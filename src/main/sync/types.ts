@@ -190,6 +190,9 @@ export interface StateSyncCtx {
   machineId: string;
   hive: HiveBridge;
   emit?: (channel: string, payload: unknown) => void;
+  /** Friendly owner label stamped onto pushed task rows (the signed-in email) so
+   *  the board picker can list teammates by something human. */
+  ownerLabel?: string;
 }
 
 /**
