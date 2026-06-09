@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- munder-difflin collaborative harness — Phase 2 schema (agent-memory sync).
+-- rp-agent-harness collaborative harness — Phase 2 schema (agent-memory sync).
 --
 -- Run this AFTER 0001 in the Supabase SQL editor (or `supabase db push`). It adds
 -- the single table SyncManager (src/main/sync/memory.ts) syncs TWO-WAY:

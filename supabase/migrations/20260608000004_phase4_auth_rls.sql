@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- munder-difflin collaborative harness — Phase 4 schema (auth + workspace RLS).
+-- rp-agent-harness collaborative harness — Phase 4 schema (auth + workspace RLS).
 --
 -- Run this AFTER 0003 in the Supabase SQL editor (or `supabase db push`). It
 -- closes the PROTOTYPE RLS hole: instead of the `anon` role being scoped only by

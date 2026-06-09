@@ -25,9 +25,9 @@ body:
     attributes:
       label: Area
       options:
-        - Office floor / avatars
+        - Hive dashboard (roster, activity, kanban)
         - Terminals / PTY
-        - The hive (memory, routing, GOD agent)
+        - The hive (memory, routing, god/orchestrator agent)
         - Files / git
         - Onboarding / config
         - Design system

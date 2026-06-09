@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- munder-difflin collaborative harness — Phase 3 schema (shared-state sync).
+-- rp-agent-harness collaborative harness — Phase 3 schema (shared-state sync).
 --
 -- Run this AFTER 0002 in the Supabase SQL editor (or `supabase db push`). It adds
 -- the three tables SyncManager (src/main/sync/state.ts) syncs across teammates'

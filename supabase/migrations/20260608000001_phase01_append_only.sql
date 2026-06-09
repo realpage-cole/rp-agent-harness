@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- munder-difflin collaborative harness — Phase 0/1 schema (append-only mirror).
+-- rp-agent-harness collaborative harness — Phase 0/1 schema (append-only mirror).
 --
 -- Run this in the Supabase SQL editor (or `supabase db push`) on a fresh project.
 -- It creates the three append-only tables SyncManager (src/main/sync.ts) mirrors

@@ -16,6 +16,3 @@ dist/
 *.cer
 *.mobileprovision
 build/AuthKey_*.p8
-
-# heavy hero source — only the compressed hero.mp4/.webm are deployed
-docs/media/*.mov

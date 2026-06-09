@@ -1,158 +1,62 @@
-<div align="center">
+# rp-agent-harness
 
-<img src="./docs/logo.png" alt="Munder Difflin Inc — Multi-Agent Harness" width="340">
+**A local multi-agent harness for [Claude Code](https://claude.com/claude-code).** `rp-agent-harness` is an internal RealPage desktop app (Electron + React + TypeScript) that turns the `claude` CLI sessions you already run in your terminal into a self-coordinating team. Each agent runs as a real Claude Code process in a pseudo-terminal, gets long-term memory and a mailbox, and is coordinated by a **god orchestrator agent** you talk to. A modern Hive dashboard shows the agent roster, a live activity feed, a task board, and a "needs you" queue for the items that require your input. Everything is local-first; an optional Supabase layer lets a team share one logical hive.
 
-# Munder Difflin
+## Table of contents
 
-**Local multi-agent harness for [Claude Code](https://claude.com/claude-code).**
-Autonomous agents that message, route, and remember — coordinated by a **GOD** orchestrator
-you talk to, and visualized as avatars at work on a shared office floor.
-
-<p>
-  <em>Electron · React · TypeScript · Pixi.js · xterm.js · node-pty</em>
-</p>
-
-<p>
-  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Status: prototype" src="https://img.shields.io/badge/status-working%20prototype-F4F1EA.svg?style=flat-square&labelColor=6E1423">
-  <img alt="Platform: macOS | Windows | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-F4F1EA.svg?style=flat-square&labelColor=6E1423">
-  <a href="./CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-</p>
-
-<br>
-
-<img src="./docs/media/og.png" alt="Munder Difflin — A hive of agents that message, route, and remember" width="1240">
-
-<br>
-
-<!-- Inline player renders on github.com (raw URL required; relative paths only link). -->
-<video src="https://github.com/chaitanyagiri/munder-difflin/raw/main/docs/media/hero.mp4" poster="https://github.com/chaitanyagiri/munder-difflin/raw/main/docs/media/og.png" controls muted loop playsinline width="820">
-  <a href="https://github.com/chaitanyagiri/munder-difflin/raw/main/docs/media/hero.mp4">▶ Watch the floor — Munder Difflin running a hive of Claude Code agents</a>
-</video>
-
-</div>
-
----
-
-> [!NOTE]
-> **The world's best agents. The world's worst paper company.**
-> Munder Difflin takes the `claude` CLI sessions you already run in your terminal and turns them
-> into a self-coordinating team: each agent gets long-term memory, a mailbox, and a desk on a 2D
-> office floor — and a **GOD orchestrator agent** routes work between them while you watch.
+- [What it is](#what-it-is)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+  - [RealPage corporate network setup](#realpage-corporate-network-setup)
+  - [Clone and install](#clone-and-install)
+- [Run and build](#run-and-build)
+- [Architecture](#architecture)
+  - [Three Electron processes](#three-electron-processes)
+  - [The Hive — on-disk coordination layer](#the-hive--on-disk-coordination-layer)
+  - [The orchestrator (god agent) and human-in-the-loop](#the-orchestrator-god-agent-and-human-in-the-loop)
+  - [Memory](#memory)
+- [The dashboard](#the-dashboard)
+- [Collaborative memory (Supabase)](#collaborative-memory-supabase)
+  - [What syncs](#what-syncs)
+  - [Auth, workspaces, and RLS](#auth-workspaces-and-rls)
+  - [Setup](#setup)
+- [Contributing](#contributing)
+  - [Security](#security)
+- [License](#license)
+- [Changelog](#changelog)
 
 ## What it is
 
-Munder Difflin is a desktop app that wraps **real Claude Code terminals** as fully-capable agents,
-wires them into a **hive mind**, and puts a **GOD orchestration agent** in charge — the one agent
-*you* talk to in order to get things done. Under the hood it runs the **fastest memory layer in the
-world** so every agent remembers what it learns and recalls it instantly.
+`rp-agent-harness` is a desktop app for running and coordinating a team of Claude Code agents on your own machine. Instead of juggling several terminal sessions by hand, you spawn agents in the app, talk to a single **orchestrator** ("god") agent, and let it decompose work and fan it out to the others. The agents coordinate through an on-disk **hive** — a single git-backed folder of plain files — so the whole team shares memory, a mailbox, a blackboard, and a task ledger.
 
-- **Every terminal is an agent.** Each `claude` session runs as a real process in a pseudo-terminal
-  (`node-pty`), byte-for-byte authentic, rendered with xterm.js.
-- **Every agent is an avatar.** Sessions appear as characters on a Pixi.js office floor — they walk
-  to stations as they work, and envelopes fly desk-to-desk when they message each other.
-- **The hive coordinates them.** Agents read their memory and drain a mailbox; the router moves
-  messages between inboxes; the GOD agent adjudicates, assigns, and escalates only when it needs you.
-- **Memory that's instant.** A markdown-first memory layer with a semantic recall index means agents
-  remember across sessions and recall in milliseconds.
-
-## How it works
-
-```
-            you ── talk to ──►  ┌─────────────┐
-                                │  GOD agent  │  orchestrator / supervisor
-                                │ (Michael's  │  roster · routing · adjudication
-                                │   office)   │  blackboard · task ledger
-                                └──────┬──────┘
-                                       │ assigns · routes · escalates
-              ┌────────────────────────┼────────────────────────┐
-              ▼                         ▼                         ▼
-        ┌───────────┐            ┌───────────┐            ┌───────────┐
-        │  agent A  │  message   │  agent B  │  message   │  agent C  │
-        │  claude   │ ─────────► │  claude   │ ─────────► │  claude   │
-        │  + memory │            │  + memory │            │  + memory │
-        └───────────┘            └───────────┘            └───────────┘
-              └──────── shared hive: memory · mailbox · blackboard · log ───────┘
-```
-
-1. **You spawn agents** — each is a normal `claude` process with its own working directory,
-   identity, and hook lifecycle.
-2. **Agents collaborate through the hive** — a local git repo of plain files. They write to their own
-   `outbox/`; the harness's router delivers into recipients' `inbox/`. No agent ever touches git
-   (single-committer design avoids `index.lock` corruption).
-3. **The GOD agent runs the floor** — it reads every request, resolves routine ones itself (keeping
-   the system fully autonomous), and only escalates *critical* items (spend, destructive ops, scope
-   changes) into an approvals queue you act on.
-4. **Everything is visible** — you watch avatars move, envelopes fly, and the live terminal stream;
-   you can type back into any session, browse its files, and read its git history.
-
-See [`HIVE.md`](./HIVE.md) for the full multi-agent design, [`SPEC.md`](./SPEC.md) for the
-terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
+It is local-first by design: everything runs on your machine and works fully offline. An optional Supabase layer lets a team share one logical hive across machines while each machine keeps its local files as the source of truth.
 
 ## Features
 
-| Area | What works today |
-|---|---|
-| **Real terminals** | Spawn Claude Code, Codex, or a custom command in a `node-pty` PTY. Full read/write/resize/kill, live streaming over IPC, multi-agent. |
-| **The hive** | On-disk multi-agent layer: per-agent identity + long-term memory, atomic-file mailboxes, a shared blackboard, append-only event log, single-committer git. |
-| **GOD orchestrator** | An always-on supervisor agent that adjudicates traffic, routes tasks, scribes the blackboard, and escalates only critical items to you. |
-| **Memory layer** | Markdown-first long-term memory per agent, mined into a shared semantic palace for instant recall; searchable from the UI. Degrades gracefully when the index isn't installed. |
-| **Office floor** | Pixi.js scene with a Tiled office map, camera, recolored cast, pathfinding, seat assignment, and tool-bubble overlays. |
-| **Message handoffs** | When the hive routes a message, an envelope flies from sender to recipient (tinted by speech-act; escalations fly to the door) and pops an arrival sparkle. |
-| **Per-agent panel** | Live terminal, command bar to type back, fullscreen terminal, sandboxed file browser + CodeMirror editor, and a git tab (status, log, commit graph, branches). |
-| **Approvals & memory panels** | Human-in-the-loop approval queue for escalations; a memory search panel over the shared palace. |
-| **Onboarding wizard** | First-run setup: harness home, registered repos, default command, auto-mode. |
-| **Design system** | Fully tokenized SNES / Animal-Crossing aesthetic — pixel panels, buttons, badges, hand-drawn icons. See [`DESIGN.md`](./DESIGN.md). |
-| **Command Center** | Michael's control surface, overhauled in v0.2.0: Terminal, Floor (roster + dispatch + per-agent model selector + live fleet monitoring), Memory (MemPalace + text search + memory graph), Activity (log + board + real token telemetry + observability + CI watcher), Tasks (kanban board with dependencies + status tracking), Schedules (recurring missions + heartbeat). |
-| **Per-agent git worktrees** | 'Git isolation' toggle in Add Agent auto-provisions a dedicated worktree per agent on spawn and tears it down on kill — agents never collide on branches. |
-| **Token & cost telemetry** | Activity tab reads `~/.claude/projects/` JSONL transcripts and surfaces real token counts + estimated USD cost per agent per session, backed by a durable cost ledger that survives restarts. |
-| **Per-agent token budgets** | Set a token budget per agent and watch live fleet monitoring track consumption across the whole roster — paired with the cost/runaway circuit breaker to keep spend in check. |
-| **Observability** | Live OpenTelemetry collector with per-model cost attribution, a fleet grid, and a per-agent tool-span waterfall — see exactly what every agent is doing and what it costs, in real time. |
-| **Context-window gauge** | Each agent card's progress bar is a context-window gauge — see how much of the model's context each agent has consumed at a glance. |
-| **Circuit breaker** | A cost/runaway guard with a steer → constrain → stop ladder: the breaker nudges, then constrains, then stops agents that loop, storm errors, or blow their budget. |
-| **HITL gate & mid-run control** | Human-in-the-loop gate, mid-run steer, and graceful stop — all driven through Claude Code hook returns, so you can intervene without killing the session. |
-| **Durable persistence** | SQLite-backed durable store keeps window bounds + history across restarts, alongside the durable cost ledger and persisted session IDs. |
-| **MemoryReflector** | Memory condensation that summarizes and bounds per-agent memory over time, so long-term memory doesn't grow without limit. |
-| **Configurable home folder** | Point the hive/memory home at any folder, with a safe move that relocates existing state without losing it. |
-| **Restore team** | One-click "Restore team" rebuilds last session's workers after a harness restart — no more re-adding agents by hand. |
-| **Task kanban** | Dependency-aware kanban board in the Command Center Tasks tab — assign tasks to agents, track status across todo/doing/blocked/done, wire dependencies so work starts in order. |
-| **Scheduled missions & heartbeat** | Recurring auto-dispatch missions with label, interval, target agent, and body — plus a scheduler heartbeat that re-engages the floor when it goes quiet. Delete scheduled missions inline, and see last/next-fired times in the Schedules tab. |
-| **GitHub ingestion** | Pull open issues from any registered repo via the `gh` CLI and assign them to agents with one click from the Command Center. |
-| **CI status watcher** | Live pass/fail/in-progress status for GitHub Actions runs, visible in the Activity tab for every registered repo. |
-| **Threaded chat** | Every hive message is grouped by conversation and rendered as a reply chain in each agent's Messages tab — readable, replyable, auditable. |
-| **Desktop notifications** | Native OS notifications when an agent finishes a task or is waiting for your input. |
-| **Agent archival** | Closing an agent tab archives it (memory + history preserved) rather than destroying it. |
-| **Avatar states** | Avatars reflect real work — including new v0.2.0 states for *compacting* (context compaction) and *looping* (circuit-breaker intervention), on top of crisper HiDPI floor text and high-contrast speech bubbles. |
+- **Multi-agent Claude Code harness.** Every agent is a real `claude` session running in a `node-pty` pseudo-terminal — full read/write/resize/kill, live streaming over IPC, multiple agents at once. Additional providers are supported, including an Antigravity (Gemini) worker and a Codex preset; hookless providers receive hive mail as a terminal work order rather than a full inbox-drain.
+- **Orchestrator + hive coordination.** The on-disk "hive" is a single-committer, git-backed coordination layer: per-agent identity and long-term memory, atomic-file mailboxes (`outbox/` → routed into `inbox/`), a shared blackboard, and an append-only event log. A god orchestrator agent (id `god`, role `orchestrator`) adjudicates traffic, routes and assigns tasks, and parks human-blocking items in a "needs you" queue. No agent ever touches git directly, which avoids `.git/index.lock` corruption.
+- **Modern Hive dashboard.** The main view composes an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" banner, with quick-nav into the Command Center tabs (Tasks, Schedules, Needs you). All bindings — tasks, human queue, messages, agent status — are real, live data.
+- **Optional Supabase collaborative sync.** Off by default. When enabled, Supabase becomes a shared "upstream" the local hive never had: an append-only mirror of the event log, cost ledger, and command history; two-way agent-memory sync; and shared registry/task/board state. It runs entirely in the Electron main process and is layered on top of the local hive — local files under `<harnessHome>/hive/` stay the source of truth and the app remains fully functional offline. Backed by Supabase Auth (email/password), Row-Level Security, and workspaces; migrations live in `supabase/migrations/`.
+- **Optional semantic memory.** Long-term agent memory is markdown-first and works on its own. When the `mempalace` CLI is on your `PATH`, the harness mines each agent's `memory.md` into a shared semantic "palace" for instant cross-session recall, searchable from the UI. It degrades silently to a no-op when the CLI isn't installed.
+- **Durability and control.** A SQLite-backed durable store (window bounds + history) and a durable cost ledger that survive restarts; a cost/runaway circuit breaker (steer → constrain → stop); per-agent token budgets and real token/cost telemetry read from `~/.claude/projects/` transcripts; live OpenTelemetry-based observability; a memory-condensation reflector; optional per-agent git worktree isolation; recurring scheduled missions (an hourly ops standup ships enabled); GitHub issue/CI ingestion via the `gh` CLI; and desktop notifications.
 
-> [!NOTE]
-> **Status: v0.2.0 — observability, control, and durability.** This release brings a Command Center overhaul, per-agent token budgets with live fleet monitoring, full observability (live OpenTelemetry collector, per-model cost, fleet grid + per-agent tool-span waterfall), an agent-card context-window gauge, a cost/runaway circuit breaker (steer → constrain → stop) with a scheduler heartbeat, a human-in-the-loop gate plus mid-run steer and graceful stop via hook returns, SQLite-backed durable persistence (window bounds + history) and a durable cost ledger, the MemoryReflector for memory condensation, a configurable hive/memory home folder with safe move, one-click "Restore team" after restart, a delete button for scheduled missions, new *compacting* and *looping* avatar states, terminal legibility/contrast + HiDPI fixes, and a Windows fix to keep the hive alive behind the lock screen. All of v0.1.x — the hook plane, office floor, hive coordination, git isolation, token telemetry, task kanban, scheduled missions, GitHub/CI integration, threaded conversations, desktop notifications, agent archival, a Slack→queue bridge, and native human-in-the-loop approvals — remains functional and shipping. macOS (signed), Windows, and Linux builds are available on the releases page.
+## Requirements
 
-## Getting started
-
-### Prerequisites
-
-- **macOS** (macOS-first; Windows/Linux untested).
-- **Node.js 18+** and npm.
-- A **C/C++ toolchain** for `node-pty`'s native addon — on macOS, install Xcode Command Line Tools:
+- **Node.js** and **npm** (Node 22+ recommended; see the Node 24 note under Install).
+- **[Claude Code](https://claude.com/claude-code)** on your `PATH` so agents can run `claude` (the default command). Any other command works too.
+- A **C/C++ toolchain** for the native addons (`node-pty`, `better-sqlite3`). On macOS, install the Xcode Command Line Tools:
   ```bash
   xcode-select --install
   ```
-- **[Claude Code](https://claude.com/claude-code)** on your `PATH` so agents can run `claude`
-  (the default command). Add Agent also includes a Codex preset that runs `codex`
-  without Claude-only flags; initial Codex support is terminal spawning with shared
-  workspace/env, not Claude telemetry, hook parity, or hive inbox delivery (direct
-  hive mail to Codex/custom agents bounces to the god agent).
-- *Optional:* the semantic memory index for instant cross-session recall (the app works without it —
-  markdown memory still functions).
+- *Optional:* the `mempalace` CLI for semantic cross-session recall (the app works without it — markdown memory still functions).
+- *Optional:* a Supabase project (URL + anon/publishable key + workspace) for collaborative team sync, configured in the app's settings.
+
+## Install
 
 ### RealPage corporate network setup
 
-On the RealPage network, Palo Alto Prisma performs TLS inspection and presents a
-**RealPage-signed certificate** for outbound HTTPS. Node and npm don't trust that
-CA out of the box, so `npm install` fails in `postinstall` with
-`SELF_SIGNED_CERT_IN_CHAIN` when `node-gyp`/`electron-rebuild` and the `electron`
-package try to download native build headers and the Electron runtime. Do this
-**once per machine** before installing:
+On the RealPage network, Palo Alto Prisma performs TLS inspection and presents a **RealPage-signed certificate** for outbound HTTPS. Node and npm don't trust that CA out of the box, so `npm install` fails in `postinstall` with `SELF_SIGNED_CERT_IN_CHAIN` when `node-gyp`/`electron-rebuild` and the `electron` package try to download native build headers and the Electron runtime. Do this **once per machine** before installing:
 
 ```bash
 # 1. Export the RealPage CA chain from the macOS keychain into a PEM file.
@@ -169,167 +73,183 @@ echo 'export NODE_EXTRA_CA_CERTS="$HOME/.realpage-ca.pem"' >> ~/.zshrc
 export NODE_EXTRA_CA_CERTS="$HOME/.realpage-ca.pem"
 ```
 
-Do **not** use `npm config set strict-ssl false` — trusting the corporate CA is
-the correct, scoped fix.
+Do **not** use `npm config set strict-ssl false` — trusting the corporate CA is the correct, scoped fix.
 
-> **Node 24 note:** the `electron` installer unpacks its runtime with a library
-> that silently truncates the extract on Node 24, leaving an unlaunchable app
-> ("Electron uninstall"). This repo's `postinstall` runs `tools/ensure-electron.cjs`,
-> which detects the broken extract and re-unpacks the runtime with the OS `unzip`
-> automatically — no action needed. It's a no-op on Node versions where the bug
-> isn't present.
+> **Node 24 note:** the `electron` installer unpacks its runtime with a library that silently truncates the extract on Node 24, leaving an unlaunchable app ("Electron uninstall"). This repo's `postinstall` runs `tools/ensure-electron.cjs`, which detects the broken extract and re-unpacks the runtime with the OS `unzip` automatically — no action needed. It's a no-op on Node versions where the bug isn't present.
 
-> **Tip:** clone to a plain local path (e.g. `~/Code`), not a cloud-synced folder
-> like OneDrive — background sync can lock or de-hydrate `node_modules` files mid-build.
+> **Tip:** clone to a plain local path (e.g. `~/Code`), not a cloud-synced folder like OneDrive — background sync can lock or de-hydrate `node_modules` files mid-build.
 
-### Install & run
+### Clone and install
 
 ```bash
 git clone https://github.com/realpage-cole/rp-agent-harness.git
 cd rp-agent-harness
-npm install        # postinstall rebuilds node-pty + heals the Electron runtime extract
-npm run dev        # launches the Electron app with hot reload
+npm install        # postinstall rebuilds native deps (node-pty) + heals the Electron runtime extract
 ```
 
-On first launch you'll go through the onboarding wizard, then land on the floor. Use **Add agent** to
-spawn your first session — the GOD agent seats itself in Michael's office automatically.
+> The most common setup failure is the native `node-pty` rebuild. The `postinstall` hook runs `electron-rebuild` so `node-pty` matches Electron's ABI. If you hit a `NODE_MODULE_VERSION` or "wrong ELF/Mach-O" error at launch, confirm your C/C++ toolchain is installed and re-run `npm install` (which re-triggers `postinstall`).
 
-### Other scripts
+## Run and build
+
+```bash
+npm run dev        # launch the Electron app with hot reload
+```
+
+On first launch you'll go through the onboarding wizard (harness home, registered repos, default command, auto-mode), then land on the Hive dashboard. Use **Add agent** to spawn your first session; the orchestrator (god) agent runs the team automatically.
 
 ```bash
 npm run build      # production build via electron-vite
 npm run preview    # preview the production build
-npm run typecheck  # type-check the node (main/preload) and web (renderer) projects
-```
+npm run typecheck  # type-check the main/preload (node) and renderer (web) projects
 
-> If `node-pty` fails to load after an Electron upgrade, re-run `npm install` (the `postinstall` hook
-> runs `electron-rebuild` against the current Electron ABI).
+npm run dist       # build, then package for the current OS via electron-builder
+npm run dist:mac   # macOS .dmg (universal)
+npm run dist:win   # Windows NSIS installer + portable .exe (x64)
+npm run dist:linux # Linux AppImage (x64)
+```
 
 ## Architecture
 
-Two data planes feed one renderer:
+`rp-agent-harness` is an Electron app with the standard three-process split, plus an on-disk coordination layer (the **Hive**) that the agents share. The agents themselves are real CLI processes — they are the *intelligence*; the main process is the *mechanism* (git, sockets, routing, the PTYs).
+
+### Three Electron processes
+
+- **Main (Node).** Owns everything privileged: it spawns each agent as a `node-pty` child and streams its output over per-id IPC, runs the Hive coordination layer (`src/main/hive.ts`), hosts the hook server that agents call back into (`src/main/hooks.ts`), wraps the optional semantic-memory CLI (`src/main/memory.ts`), and drives the optional Supabase sync (`src/main/sync/*`).
+- **Preload.** A thin `contextBridge` that exposes a single typed `window.cth` API to the renderer (`src/preload/index.ts`). The renderer never touches Node, IPC channels, the filesystem, or git directly — only this bridge.
+- **Renderer (React).** The modern **Hive dashboard** (`src/renderer/src/components/dashboard/*`): an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" queue for items waiting on a human. It also hosts the per-agent terminals (xterm.js over the PTY bytes). It is a pure view over state the main process owns.
+
+### The Hive — on-disk coordination layer
+
+Everything the team knows is plain files in one local git repo under `<harnessHome>/hive/`. Two rules make this safe under many concurrent agents:
+
+- **Single committer.** Only the Electron main process ever runs git (commit with retry/backoff and stale-lock recovery). Agents never call git — they just read and write files. This avoids `.git/index.lock` corruption.
+- **Single-writer-per-file.** Each agent writes only inside its own `agents/<id>/` directory. Cross-agent delivery is done by the **router** (in the main process), which moves messages out of a sender's `outbox/` and into the recipient's `inbox/`. No file is ever written by two processes.
+
+Layout:
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                     Electron Renderer (React)                  │
-│   ┌──────────────────┐    ┌──────────────────────────────┐    │
-│   │ Office Floor      │    │ Terminal + Command Bar       │    │
-│   │ (Pixi.js)        │    │ Files + Git tabs (xterm.js)  │    │
-│   └─────────▲────────┘    └────────────▲─────────────────┘    │
-│             │ avatar state             │ pty bytes / fs / git  │
-└─────────────┼──────────────────────────┼───────────────────────┘
-              │ IPC (contextBridge: window.cth)
-       ┌──────┴──────────┐        ┌──────┴─────────────┐
-       │  Event Plane    │        │  Terminal Plane    │
-       │  hooks / hive   │        │  node-pty PTYs     │
-       │  router + GOD   │        │  + fs + git        │
-       └────────▲────────┘        └──────▲─────────────┘
-                │ hook payloads          │ stdin / stdout
-                └─────────┬──────────────┘
-                   ┌──────┴──────────────┐
-                   │  claude (or any cmd)│
-                   └─────────────────────┘
+hive/
+  PROTOCOL.md          agent-facing contract (how to remember + message)
+  COMMANDS.md          CLI / slash-command reference the orchestrator consults
+  registry.json        roster: every agent — role, capabilities, status, session id
+  board.md             shared blackboard / co-authored plans (orchestrator is sole scribe)
+  tasks.json           kanban task ledger (id, assignee, status, dependsOn, humanQA, …)
+  log.jsonl            append-only event feed (drives the dashboard activity stream)
+  agents/<id>/
+    identity.md        who am I, my role, my capabilities  (refreshed each spawn)
+    memory.md          my long-term memory  (read at task start, appended as I learn)
+    inbox/             messages delivered TO me — one JSON file per message
+    inbox/.done/       processed messages, kept for audit (not deleted)
+    outbox/            messages I want to SEND — the router drains these
+    cursor.json        { lastProcessed } — so a message is surfaced exactly once
 ```
 
-- **Terminal plane.** The main process owns a `PtyManager` that spawns each agent as a `node-pty`
-  process and streams output over per-id IPC (`pty:data:<id>`). The renderer talks only through a
-  typed `window.cth` bridge ([`src/preload/index.ts`](./src/preload/index.ts)), which also exposes
-  sandboxed filesystem and git helpers.
-- **Hive / event plane.** `hive.ts` is the on-disk multi-agent layer; `hooks.ts` runs a Unix-socket
-  server that the per-agent `cth-hook` shim POSTs Claude Code hook payloads to (`PreToolUse`,
-  `PostToolUse`, `Stop`, …); `memory.ts` wraps the semantic memory CLI. The router delivers messages,
-  the GOD agent adjudicates, and a `Stop`-loop keeps idle agents draining their inboxes.
+Each message is one JSON file written via temp-file + atomic rename, never a co-edited mailbox. `log.jsonl` is append-only and consumers track their own cursor. `board.md` is the one genuinely co-edited file, so all writes go through the orchestrator as the single scribe.
 
-## Project structure
+**The router** polls every `outbox/` (cheap and robust versus `fs.watch`, default ~1.5s), normalizes each message, delivers it to the recipient's `inbox/`, appends to `log.jsonl`, and commits — all in the main process. Messages addressed to `"god"`, `"broadcast"`, or `"human"` are resolved here (a `"human"` message routes to the orchestrator, the human's proxy on the team). A hop cap stops two agents from ping-ponging forever.
 
-```
-src/
-  main/                      Electron main process (Node)
-    index.ts                 window, IPC handlers, quit guard
-    pty.ts                   node-pty manager (spawn/write/resize/kill/stream)
-    hive.ts                  on-disk multi-agent layer (memory, mailboxes, router)
-    hooks.ts                 UDS hook server + cth-hook shim + Stop-loop
-    memory.ts                semantic memory layer (CLI wrapper, degrade-to-noop)
-    config.ts                harness config persistence + home setup
-    transcript.ts            reads ~/.claude/projects/ JSONL transcripts for real token/cost telemetry
-    telemetry.ts             live OTel collector + usage/cost feed for observability
-    usage.ts / pricing.ts    UsageProvider seam + per-model cost attribution
-    breaker.ts / control.ts  cost/runaway circuit breaker (steer/constrain/stop) + HITL gate / steer / stop
-    reflect.ts               MemoryReflector — memory condensation
-    db.ts                    SQLite durable store (window bounds + history) + durable cost ledger
-    github.ts                GitHub issue + CI run ingestion via the gh CLI
-    assistant.ts             headless Sonnet enrichment pipeline (Dwight)
-    shellEnv.ts              resolve PATH and shell env for child processes
-    fs.ts / git.ts           sandboxed filesystem + git bridges
-  preload/                   contextBridge → typed window.cth API
-  renderer/src/
-    App.tsx                  top-level layout + wiring
-    design/                  tokens.css / tokens.ts / global.css (design source of truth)
-    components/              PixelPanel, AgentDetailPanel, CommandBar, ApprovalsPanel, MemoryPanel, …
-    CommandCenterPanel,      Michael's control surface (Terminal/Floor/Memory/Activity/Tasks/Schedules/Handbook tabs)
-    ToolWaterfall,           per-agent tool-span waterfall for the observability view
-    TasksKanban,             dependency-aware kanban board (Tasks tab)
-    ThreadsPanel,            hive message conversation viewer (Messages tab)
-    MessageQueueComposer,    park messages for a busy agent + enrich toggle
-    scene/office/            Pixi office floor: OfficeFloor, Character, Camera, cast, pathfinding, …
-    store/ · hooks/          zustand store, event loop, PTY parser, typewriter
-    assets/                  tilesets, maps, character sheets (see ATTRIBUTION.md)
-docs/                        `logo.png`, `banner.png`, landing page (GitHub Pages → munderdiffl.in)
-docs/media/                  `og.png` (social previews) + rendered Remotion clips
-landing-remotion/            Remotion project that renders the landing page's "how it works" clips
-HIVE.md · SPEC.md · DESIGN.md   multi-agent · terminal/event · visual design
-```
+### The orchestrator (god agent) and human-in-the-loop
 
-## Design system
+One always-on privileged agent is the **orchestrator**, also called the **god agent** (its id is `god`, flagged `isGod` in the registry). It is an ordinary agent process — the intelligence — that owns the team-level work:
 
-The aesthetic is **Animal Crossing × Earthbound × SNES menu UI** — pixel-snapped, chunky, friendly.
-[`DESIGN.md`](./DESIGN.md) is canonical; every component derives from its tokens. The Munder Difflin
-brand layers a **Dunder-Mifflin maroon** (`#6E1423`) and **gold** (`#F4D35E`) on top for logo and
-chrome. The 15 avatars are the cast of *The Office*, differentiated by hair/skin/shirt recipes.
+- **Roster & routing** (`registry.json`) — who exists, their capabilities and status.
+- **Delegation** — decompose work and fan it out to worker agents via their inboxes as self-contained task contracts; it does not do the grunt work itself.
+- **Blackboard scribe** — the single writer of `board.md`, so shared plans never conflict.
+- **Task ledger** (`tasks.json`) — assign, track, retry, and mark done; an assignee stays on a card so the board reads as who-did-what.
 
-## Roadmap
+There is **no separate approval queue**. Human-in-the-loop is native to each agent's own Claude Code session: tool-permission prompts are the gate, and they can be approved remotely (e.g. from a phone via `/remote-control`). When a task can only proceed with a human's input — a question or an action only a person can take — the orchestrator marks the card `blocked` and appends the ask to the card's `humanQA` array; the dashboard surfaces these in the **needs you** queue, and the answer flows back both onto the card and as an inbox message to the orchestrator.
 
-Shipped in **v0.2.0**:
+Autonomy comes from a `Stop` hook: when an agent finishes a turn, the hook checks its inbox via the main process and, if there are unread messages, returns `{"decision":"block", …}` to keep the agent working (guarded against infinite loops by `stop_hook_active` and the per-agent cursor).
 
-- [x] **Heartbeat** — scheduler heartbeat that re-engages the floor when it goes quiet, with last/next-fired times surfaced in the Schedules tab.
-- [x] **Memory reflection** — the MemoryReflector summarizes and bounds per-agent memory over time to prevent unbounded growth.
-- [x] **Persistence** — SQLite-backed durable store for window bounds + history across restarts, plus a durable cost ledger and persisted session IDs.
-- [x] **Hook-driven avatars** — broadened hook→station coverage and caged the synthetic demo loop, with new *compacting* and *looping* avatar states.
+### Memory
 
-Next up:
+- **Markdown first (always on).** Every agent has a `memory.md` it reads at the start of a task and appends to as it learns, plus the shared `board.md`. This is the durable memory of the team and needs nothing beyond the filesystem.
+- **Semantic memory (optional).** `src/main/memory.ts` wraps the **MemPalace** CLI. When enabled, the harness keeps one shared "palace" under `harnessHome`, points every agent's `MEMPALACE_PALACE_PATH` at it, and mines each agent's `memory.md` into its own wing so the whole team can recall by meaning (`mempalace search`, `mempalace wake-up`). Embeddings run locally via a downloaded sentence-transformers model — `minilm` (light, the default) or the multilingual `embeddinggemma`, fetched on first run. This layer is entirely optional: if `mempalace` isn't installed, or the setting is left off, it degrades to a silent no-op and plain markdown memory still works.
 
-- [ ] **Chat integrations** — Slack and Telegram bridges that pipe a channel straight into Michael's queue (and route his replies back out), so you can run the floor from your phone.
-- [ ] **Pluggable agent CLIs** — run the harness over coding-agent CLIs beyond Claude Code: Claw Code, opencode, and Codex CLI.
-- [ ] **Realtime Michael** — a low-latency realtime LLM channel for quick, snappy back-and-forth with the orchestrator, alongside the async terminal.
-- [ ] **Fuller avatar coverage** — push the remaining station visits and tool-bubbles to be driven 100% by real Claude Code hook events.
-- [ ] **Durable layout & command history** — extend persistence to agent layout and per-session command history.
+## The dashboard
+
+The main pane is a modern **Hive dashboard**. It composes four live, real-data panels plus quick-nav into the Command Center:
+
+- **Team roster** (left) — one card per agent: avatar, name, a status badge (`idle` / `working` / `blocked` / `gone`, plus `compacting`/`looping` states), and a current-action line (live action, falling back to the last prompt). The god/orchestrator card is tagged **LEAD**. Clicking a card selects that agent and drives the right-hand detail sidebar.
+- **Task board** (center) — a kanban of the hive ledger in **To do / Doing / Blocked / Done** columns, with per-column counts and cards showing title + assignee (or a **needs you** flag). Any card or the header opens the Command Center's **Tasks** tab.
+- **Activity feed** (right) — routed hive messages newest-first ("X asked Y", "X informed the team", etc.), rendered from the live message stream; human escalations are highlighted and framed toward "… You".
+- **Needs-you banner** (top) — appears only when the orchestrator has parked one or more questions for the human; it shows the count and an **Answer →** button into the Command Center's **human** tab.
+
+A header row provides quick-nav buttons (**Tasks**, **Schedules**, **Needs you**) into the **Command Center** tabs — the per-agent control surface for tasks, scheduled missions, and the human-in-the-loop queue.
+
+## Collaborative memory (Supabase)
+
+`rp-agent-harness` is **local-first**. Every machine's hive lives on disk under `<harnessHome>/hive/` (a single-committer git repo of plain files), and the harness is fully functional offline. Supabase sync is an **optional layer bolted on top** — the shared "upstream" the local git repo never had. Turn it off and nothing changes locally; the local files stay the source of truth.
+
+When enabled, a `SyncManager` running in the Electron **main process** (the workspace token must never reach the renderer, and the renderer's CSP blocks `supabase.co`/`wss`) push/pulls on a 60s beat plus a 30s catch-up poll for shared state. `@supabase/supabase-js` is loaded by dynamic import, so a missing dependency just leaves sync inactive instead of breaking boot. Sync is a complete no-op unless `syncEnabled`, a Supabase URL, an anon key, and a workspace id are all set *and* a user is signed in.
+
+### What syncs
+
+- **Append-only event mirror (one-way up).** Three sinks are tailed from byte/id cursors and upserted with a deterministic dedup key, so a crash or cursor reset can never double-insert:
+  - `<hive>/log.jsonl` → `public.hive_log`
+  - `<hive>/cost-ledger.jsonl` → `public.cost_ledger`
+  - the SQLite `command_history` table → `public.command_history`
+- **Per-agent memory (two-way).** Each owned agent's `<hive>/agents/<id>/memory.md` is hashed and pushed to `public.agent_memory` (keyed on `workspace_id, agent_id`) when it changes. Teammates' rows are pulled into `<hive>/mirror/agents/<id>/memory.md` and re-mined into the local memory graph. Push scans `agents/`, pull writes `mirror/agents/` — disjoint paths, so there's no echo loop. One agent lives on one machine, so there's no merge: last-write-wins by `updated_at`.
+- **Shared hive state (live, two-way).** The roster (`registry.json` → `public.agents`), the task kanban (`tasks.json` → `public.tasks`), and the blackboard (`board.md` → `public.board`) sync across machines. Pull is **Supabase Realtime** (`postgres_changes`) backed by the 30s catch-up poll (Realtime can drop events). Conflict policy is **last-writer-wins by `updated_at`, additive** — pull never deletes a local row, and a remote row overwrites a local one only when its `updated_at` is strictly newer.
+
+Cursors and the per-machine id live in the local SQLite kv store, so they survive restarts. Every pass is best-effort and independent — one sink or table failing never blocks the others, and a failed pass simply retries on the next beat.
+
+### Auth, workspaces, and RLS
+
+Sync is gated on **Supabase Auth (email/password)** and a **workspace**:
+
+- `public.workspaces` (one row per team) and `public.workspace_members` (which users belong to which workspace).
+- A `SECURITY DEFINER` helper `is_workspace_member(ws)` that every data table's RLS consults; `EXECUTE` on it is granted to authenticated users only.
+- Every data table is **authenticated-only and membership-scoped**: a row is readable/writable only by signed-in members of its workspace. Deletes are denied everywhere (append-only / additive by construction).
+
+There are two clients in the main process: a dedicated **auth client** (`signInWithPassword` / `setSession` / `signOut`) and a **data client** built with an `accessToken` callback so every DB call carries the session token and RLS sees `auth.uid()`. The session (access + refresh tokens) lives **only** in the main process and the local kv store — it never crosses IPC; the renderer only ever sees a tokenless snapshot (signed in or not, and who). A returning user's session is restored on launch, so sync arms immediately.
+
+### Setup
+
+1. **Apply the schema.** Point the project at a Supabase project (`supabase/config.toml` carries the public `project_id`), then apply the migrations in `supabase/migrations/` — via `supabase db push`, the Supabase SQL editor, or the GitHub integration. They run in order: append-only mirror → agent memory → shared state → auth + RLS → two RLS hardening/fix migrations.
+2. **Enable Email auth and create a user.** In the Supabase dashboard, turn on the Email auth provider and create at least one user (or allow sign-ups) — there's no in-app sign-up; the harness signs in an existing account.
+3. **Configure the harness.** Open **Settings → Sync**. Toggle sync on, paste your **Supabase URL** and **anon key** (Supabase project → Settings → API).
+4. **Sign in.** Enter your email + password and click **sign in**.
+5. **Create or join a workspace.** Either **create** one (give it a name) or **join** an existing one (paste its workspace id). The id is persisted as your `syncWorkspaceId` and stamped on every synced row. Share that id with teammates so they can join the same hive.
+6. **Start.** Click **start**. Sync only runs once you're signed in *and* a workspace is set; everything is scoped to that team.
+
+> **Known caveat — migration history vs. repo filenames.** A hosted project's applied migration history may not match the repo filenames one-to-one (timestamps can differ, and one migration name differs by suffix). The **schema is equivalent**, but `supabase db push` / `supabase migration list` may report drift. Reconcile by version if you re-link the project.
 
 ## Contributing
 
-Contributions are welcome — this is an early prototype with a lot of surface area. Start with
-[`CONTRIBUTING.md`](./CONTRIBUTING.md). The short version: fork, `npm install && npm run dev`, keep
-`npm run typecheck` green, and **derive any new UI from [`DESIGN.md`](./DESIGN.md) tokens**. Good
-first areas: wiring real hook events, the add-agent flow, the config drawer, and cross-platform work.
+`rp-agent-harness` is an internal RealPage tool and an early prototype, so there's a lot of surface area and plenty of room to help.
+
+**Development setup.** Follow [Requirements](#requirements) and [Install](#install) above. On the RealPage corporate network, do the one-time [CA-trust setup](#realpage-corporate-network-setup) before `npm install`, otherwise the native rebuild and Electron-runtime download fail with `SELF_SIGNED_CERT_IN_CHAIN`. The app is developed macOS-first; Windows and Linux are exercised in CI and have platform-specific code paths, and cross-platform fixes are welcome.
+
+**Before you open a PR:**
+
+1. **Keep the type-checker green:** `npm run typecheck` runs both TypeScript projects — `typecheck:node` (main/preload/shared, `tsconfig.node.json`) and `typecheck:web` (the React renderer, `tsconfig.web.json`). Both are `strict`. This is the de-facto CI gate; there is no test suite yet.
+2. **Confirm a production build works:** `npm run build` (electron-vite). The CI build job exercises the native `node-pty` rebuild and is allowed to fail without blocking; typecheck is the gate that must stay green.
+3. **For anything visual, include a screenshot or short clip** in the PR.
+
+CI runs on every push and PR to `main` (`.github/workflows/ci.yml`): a `typecheck` job (the gate) plus a best-effort `build` job, both on `macos-latest` with Node 20. Tagged `v*` pushes trigger `release.yml`, which builds and publishes per-platform installers.
+
+**Branch & PR flow:**
+
+- Branch off `main`; keep each PR focused on a single change.
+- Write a clear PR description of *what* changed and *why*, and link any related issue (`Closes #123`).
+- Don't commit `node_modules/`, `out/`, or built artifacts (already gitignored).
+- Bug reports and feature requests use the issue forms under `.github/ISSUE_TEMPLATE/`; blank issues are disabled.
+
+As an internal RealPage project, this follows RealPage's standard code of conduct and engineering norms — be respectful and constructive.
+
+### Security
+
+`rp-agent-harness` is a local-first desktop app. It spawns local processes in PTYs and reads/writes files only under directories you register, sandboxed and path-validated in the main process. The renderer has no direct Node access (`nodeIntegration: false`, `contextIsolation: true`); all `fs:*` / `git:*` IPC is typed through a `contextBridge` (`window.cth`) and rooted at an agent's working directory. The hive commits to a local git repo from a single committer (the main process); agents only write plain files. The only network listener is a local socket (or named pipe on Windows) for the hook server.
+
+When optional Supabase collaborative sync is enabled, Supabase Auth tokens live **only** in the main process (never crossing IPC to the renderer), and workspace access is enforced server-side with Row-Level Security — a client only sees rows for workspaces it belongs to.
+
+Because this is an internal tool, **report security issues privately** to the maintainer rather than opening a public issue or PR — include a description, reproduction steps, and impact.
 
 ## License
 
-> [!IMPORTANT]
-> **Asset licensing.** The bundled pixel art (tilesets, maps, and the base character sheets the
-> Office cast is recolored from) comes from [LimeZu](https://limezu.itch.io/) via
-> [`shahar061/the-office`](https://github.com/shahar061/the-office) under the **LimeZu FREE VERSION
-> license — non-commercial use only**. The recolored sprites inherit that restriction. See
-> [`src/renderer/src/assets/ATTRIBUTION.md`](./src/renderer/src/assets/ATTRIBUTION.md). **To
-> commercialize, replace these assets or obtain a paid LimeZu license.**
+See [LICENSE](./LICENSE).
 
-The **source code** is licensed under the **MIT License** — see [`LICENSE`](./LICENSE). The MIT grant
-covers the code only; the non-commercial asset restriction above is carved out in the `LICENSE` scope
-note. *Munder Difflin* is an affectionate parody and is not affiliated with NBC's *The Office* or
-Dunder Mifflin.
+## Changelog
 
-## Acknowledgements
-
-- [LimeZu](https://limezu.itch.io/) — pixel-art tilesets and character base sheets.
-- [`shahar061/the-office`](https://github.com/shahar061/the-office) — office tileset/map vendoring.
-- [Pixi.js](https://pixijs.com/) · [xterm.js](https://xtermjs.org/) · [node-pty](https://github.com/microsoft/node-pty) · [electron-vite](https://electron-vite.org/) · [CodeMirror](https://codemirror.net/) — the libraries this is built on.
-- [Remotion](https://www.remotion.dev/) — the landing page's animated "how it works" clips (`landing-remotion/`).
-- *The Office* (US) — for Munder Difflin, Inc.
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history.
