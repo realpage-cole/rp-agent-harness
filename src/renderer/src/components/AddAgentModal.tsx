@@ -19,6 +19,29 @@ import {
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
 
+/** Pre-made agent formats. Each spawns with a STABLE id so it adopts the charter
+ *  pre-seeded in `hive/agents/<id>/memory.md` (the harness seeds memory.md once
+ *  and never overwrites it). All are Claude agents; effort is set per-charter. */
+interface AgentPreset {
+  id: string;
+  name: string;
+  role: string;
+  model: string;
+  accent: AccentColorName;
+  capabilities: string[];
+}
+export const AGENT_PRESETS: AgentPreset[] = [
+  { id: 'architect',       name: 'Architect',       role: 'technical lead & planner',      model: 'claude-opus-4-8',   accent: 'lilac', capabilities: ['planning', 'system-design', 'decomposition', 'spec-writing'] },
+  { id: 'backend',         name: 'Backend',         role: 'backend & API engineer',        model: 'claude-sonnet-4-6', accent: 'sky',   capabilities: ['apis', 'services', 'databases', 'business-logic', 'unit-tests'] },
+  { id: 'frontend',        name: 'Frontend',        role: 'frontend & UI engineer',        model: 'claude-sonnet-4-6', accent: 'mint',  capabilities: ['ui', 'components', 'state', 'styling', 'accessibility', 'frontend-tests'] },
+  { id: 'data-ml',         name: 'Data/ML',         role: 'data pipelines & ML engineer',  model: 'claude-opus-4-8',   accent: 'peach', capabilities: ['data-pipelines', 'analysis', 'ml', 'notebooks', 'sql', 'evaluation'] },
+  { id: 'infra-devops',    name: 'Infra',           role: 'DevOps & automation engineer',  model: 'claude-opus-4-8',   accent: 'lemon', capabilities: ['ci-cd', 'github-actions', 'gh-aw', 'cloud', 'scripting', 'release'] },
+  { id: 'rp-integrations', name: 'RP-Integrations', role: 'RealPage systems integrator',   model: 'claude-opus-4-8',   accent: 'coral', capabilities: ['tfs', 'salesforce-sr', 'azure-ad', 'sharepoint', 'basic-memory'] },
+  { id: 'reviewer',        name: 'Reviewer',        role: 'code reviewer & security auditor', model: 'claude-opus-4-8', accent: 'lilac', capabilities: ['code-review', 'security-review', 'correctness', 'standards'] },
+  { id: 'qa-verify',       name: 'QA',              role: 'QA & verification engineer',    model: 'claude-sonnet-4-6', accent: 'mint',  capabilities: ['testing', 'run-app', 'verify', 'regression', 'repro'] },
+  { id: 'researcher',      name: 'Researcher',      role: 'research & documentation',      model: 'claude-opus-4-8',   accent: 'sky',   capabilities: ['deep-research', 'web-search', 'synthesis', 'docs', 'fact-check'] }
+];
+
 function basename(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path;
 }
@@ -74,6 +97,22 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
+  // null = "Custom" (the original freeform flow). Selecting a preset fills the
+  // form AND pins the spawn id to the preset's stable id so it adopts the
+  // charter pre-seeded in hive/agents/<id>/memory.md.
+  const [presetId, setPresetId] = useState<string | null>(null);
+  const selectedPreset = AGENT_PRESETS.find(p => p.id === presetId);
+  const applyPreset = (p: AgentPreset) => {
+    setPresetId(p.id);
+    setName(p.name);
+    setDescription(p.role);
+    setAccent(p.accent);
+    setProvider('claude');
+    setModel(p.model);
+    setCommand(buildSpawnCommand(config, p.model, 'claude'));
+    setError(undefined);
+  };
+
   const pickFolder = async () => {
     setError(undefined);
     const res = await window.cth.chooseFolder();
@@ -88,7 +127,9 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     if (!command.trim()) { setError('Command is required'); return; }
 
     setBusy(true);
-    const id = uniqueId(name);
+    // A preset pins the id (so it maps to its pre-seeded charter); custom agents
+    // get a fresh unique id as before.
+    const id = selectedPreset?.id ?? uniqueId(name);
     const ptyId = `pty-${id}`;
     // Split the editable command field into argv-style pieces for node-pty.
     // Quote-aware so an agy model label like "Gemini 3.1 Pro (High)" — or any
@@ -110,7 +151,8 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         name: name.trim(),
         provider,
         cwd,
-        role: description.trim() || undefined
+        role: description.trim() || undefined,
+        capabilities: selectedPreset?.capabilities
       }
     });
     if (!spawnRes.ok) {
@@ -161,6 +203,47 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
           noPadding
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16 }}>
+            <Row label="Template">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setPresetId(null)}
+                  title="Configure every field by hand"
+                  style={{
+                    padding: '3px 8px 1px',
+                    background: presetId === null ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                    boxShadow: presetId === null
+                      ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                      : 'inset 0 0 0 1px var(--cth-ink-700)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                    color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none'
+                  }}
+                >
+                  Custom
+                </button>
+                {AGENT_PRESETS.map((p) => {
+                  const active = presetId === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => applyPreset(p)}
+                      title={`${p.role} · ${p.model.includes('opus') ? 'Opus' : p.model.includes('sonnet') ? 'Sonnet' : p.model}`}
+                      style={{
+                        padding: '3px 8px 1px',
+                        background: active ? `var(--cth-${p.accent}-light)` : 'var(--cth-cream-100)',
+                        boxShadow: active
+                          ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                          : 'inset 0 0 0 1px var(--cth-ink-700)',
+                        fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                        color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none'
+                      }}
+                    >
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </Row>
+
             <Row label="Name">
               <input
                 value={name}
