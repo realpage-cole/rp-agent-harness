@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { useStore } from '@/store/store';
 import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
@@ -13,80 +12,35 @@ const COLUMNS: Array<{ status: TaskStatus; label: string; accent: string }> = [
   { status: 'done', label: 'Done', accent: 'var(--cth-mint)' }
 ];
 
-/** A teammate board option from the picker (machine id + friendly owner label). */
-interface BoardOption { machineId: string; ownerLabel: string | null }
-
 /**
- * Kanban view of the hive ledger. Defaults to YOUR board (the local hive's
- * tasks.json via useHiveTasks). A board picker lets you switch to a teammate's
- * board — fetched read-only from Supabase on demand (your local board is never
- * polluted with their tasks). The header / cards open the local Command Center
- * tasks tab only while viewing your own board.
+ * Kanban view of the hive ledger. Driven by the shared view toggle (store
+ * `viewedOwner`): your own board (local hive's tasks.json via useHiveTasks) by
+ * default, or a teammate's board fetched READ-ONLY from Supabase when one is
+ * selected — the same selection that switches the roster, so they move together.
+ * Your local board is never polluted with a teammate's tasks. The header / cards
+ * open the local Command Center tasks tab only while viewing your own board.
  */
 export function TaskBoard() {
-  // null = my board; otherwise a teammate's machine id.
-  const [owner, setOwner] = useState<string | null>(null);
-  const [boards, setBoards] = useState<BoardOption[]>([]);
-
+  const viewedOwner = useStore((s) => s.viewedOwner);
   const mine = useHiveTasks();
-  const teammate = useTeammateTasks(owner);
-  const { grouped, loaded } = owner ? teammate : mine;
-  const viewingTeammate = owner !== null;
+  const teammate = useTeammateTasks(viewedOwner ? viewedOwner.machineId : null);
+  const { grouped, loaded } = viewedOwner ? teammate : mine;
+  const viewingTeammate = viewedOwner !== null;
 
   const agents = useStore((s) => s.agents);
   const requestCommandCenterTab = useStore((s) => s.requestCommandCenterTab);
-  // Only the local board navigates to the (local) Command Center tasks tab.
+  // Only your own board navigates to the (local) Command Center tasks tab.
   const openTasks = viewingTeammate ? undefined : () => requestCommandCenterTab('tasks');
 
   const nameFor = (id?: string): string | undefined =>
     id ? (agents.find((a) => a.id === id)?.name ?? id) : undefined;
-
-  // Refresh the list of teammate boards (everyone in the workspace but you).
-  // Best-effort + graceful: when sync is off / signed out it returns [] and the
-  // picker just shows "My board".
-  useEffect(() => {
-    let cancelled = false;
-    const load = async (): Promise<void> => {
-      try {
-        const list = await window.cth.syncListTaskBoards();
-        if (!cancelled) setBoards(Array.isArray(list) ? list : []);
-      } catch { /* keep the last list */ }
-    };
-    void load();
-    const handle = setInterval(() => { void load(); }, 20000);
-    return () => { cancelled = true; clearInterval(handle); };
-  }, []);
-
-  // If the currently-viewed teammate disappears from the list, fall back to mine.
-  useEffect(() => {
-    if (owner && !boards.some((b) => b.machineId === owner)) setOwner(null);
-  }, [boards, owner]);
-
-  const ownerLabel = (b: BoardOption): string => b.ownerLabel || `teammate ${b.machineId.slice(0, 6)}`;
 
   return (
     <PixelPanel
       title="TASKS"
       style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-500)' }}>
-          Board
-          <select
-            value={owner ?? 'me'}
-            onChange={(e) => setOwner(e.target.value === 'me' ? null : e.target.value)}
-            style={{
-              fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-900)',
-              background: 'var(--cth-cream-100)', border: '1px solid var(--cth-ink-100)',
-              borderRadius: 4, padding: '2px 6px', maxWidth: 200
-            }}
-          >
-            <option value="me">My board</option>
-            {boards.map((b) => (
-              <option key={b.machineId} value={b.machineId}>{ownerLabel(b)}</option>
-            ))}
-          </select>
-        </label>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: 8 }}>
         {viewingTeammate ? (
           <span style={{ fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-300)' }}>read-only</span>
         ) : (

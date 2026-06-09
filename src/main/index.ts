@@ -1656,8 +1656,11 @@ ipcMain.handle('sync:joinWorkspace', async (_evt, opts: unknown) => {
   if (!r.ok || !r.workspaceId) return { ok: false, error: r.error ?? 'could not join workspace' };
   return adoptWorkspaceId(r.workspaceId);
 });
-/** List teammate task-boards in the workspace (read-only board picker). */
-ipcMain.handle('sync:listTaskBoards', () => syncManager.listTaskBoards());
+/** List the teammate hives you can switch to (read-only roster + kanban picker). */
+ipcMain.handle('sync:listHiveOwners', () => syncManager.listHiveOwners());
+/** Fetch a teammate's roster (read-only) by their machine id. */
+ipcMain.handle('sync:teammateAgents', (_evt, machineId: unknown) =>
+  typeof machineId === 'string' ? syncManager.teammateAgents(machineId) : Promise.resolve([]));
 /** Fetch a teammate's kanban (read-only) by their machine id; same shape as hive:tasks. */
 ipcMain.handle('sync:teammateTasks', (_evt, machineId: unknown) =>
   typeof machineId === 'string' ? syncManager.teammateTasks(machineId) : Promise.resolve({ tasks: [] }));

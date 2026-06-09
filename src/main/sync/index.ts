@@ -42,7 +42,7 @@ import {
 import { errMsg } from './io';
 import { pushAppendOnly } from './push';
 import { pushMemory, pullMemory } from './memory';
-import { pushState, pullStateOnce, subscribeState, listTaskOwners, fetchTeammateTasks, type TaskBoardOwner } from './state';
+import { pushState, pullStateOnce, subscribeState, listHiveOwners, fetchTeammateAgents, fetchTeammateTasks, type HiveOwner, type TeammateAgent } from './state';
 import * as auth from './auth';
 
 export type {
@@ -367,16 +367,26 @@ export class SyncManager {
     return this.ensureWorkspace({ create: false, id });
   }
 
-  // ─── teammate-board read (the kanban toggle) ───────────────────────────────
+  // ─── teammate-hive read (the unified roster + kanban toggle) ───────────────
 
-  /** List the teammate task-boards available to view in this workspace (everyone
-   *  but this machine). Read-only; gated on a signed-in, configured client. */
-  async listTaskBoards(): Promise<TaskBoardOwner[]> {
+  /** List the teammate hives you can switch to in this workspace (everyone but
+   *  this machine). Read-only; gated on a signed-in, configured client. */
+  async listHiveOwners(): Promise<HiveOwner[]> {
     if (!this.client || !this.auth.signedIn) return [];
     const s = this.settings();
     if (!s.workspaceId) return [];
     try {
-      return await listTaskOwners(this.client, s.workspaceId, this.machineId());
+      return await listHiveOwners(this.client, s.workspaceId, this.machineId());
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Fetch a teammate's roster (read-only) by their machine id. */
+  async teammateAgents(machineId: string): Promise<TeammateAgent[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId || !machineId) return [];
+    try {
+      return await fetchTeammateAgents(this.client, s.workspaceId, machineId);
     } catch (e) { this.lastError = errMsg(e); return []; }
   }
 

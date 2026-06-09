@@ -709,10 +709,13 @@ const api = {
    *  — NEVER tokens. */
   syncJoinWorkspace: (opts: { id: string }): Promise<{ ok: boolean; id?: string; error?: string }> =>
     ipcRenderer.invoke('sync:joinWorkspace', opts),
-  /** List teammate task-boards (machine_id + owner label) you can switch to —
-   *  everyone in the workspace but you. Read-only. */
-  syncListTaskBoards: (): Promise<{ machineId: string; ownerLabel: string | null }[]> =>
-    ipcRenderer.invoke('sync:listTaskBoards'),
+  /** List the teammate hives (machine_id + owner label) you can switch to —
+   *  everyone in the workspace but you. Read-only. Drives the unified view toggle. */
+  syncListHiveOwners: (): Promise<{ machineId: string; ownerLabel: string | null }[]> =>
+    ipcRenderer.invoke('sync:listHiveOwners'),
+  /** Fetch a teammate's roster (read-only). */
+  syncTeammateAgents: (machineId: string): Promise<{ id: string; name: string; status: string; isGod: boolean }[]> =>
+    ipcRenderer.invoke('sync:teammateAgents', machineId),
   /** Fetch a teammate's kanban (read-only); same `{ tasks: [...] }` shape as hiveTasks(). */
   syncTeammateTasks: (machineId: string): Promise<{ tasks: unknown[] }> =>
     ipcRenderer.invoke('sync:teammateTasks', machineId),

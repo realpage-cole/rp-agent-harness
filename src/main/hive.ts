@@ -954,68 +954,15 @@ export class HiveManager {
     if (!root) return;
     try { this.ensureHive(); } catch { return; }
 
-    try {
-      if (remote.agents && remote.agents.length) this.mergeAgents(root, remote.agents);
-    } catch { /* best-effort per file */ }
-    // tasks are PER-OWNER and intentionally NOT merged: a teammate's kanban must
-    // never land in this hive's tasks.json (it would pollute the local board and
-    // confuse local agents). Each machine keeps its own board; teammate boards are
-    // viewed on demand from Supabase (sync teammate-board read), so `remote.tasks`
-    // is ignored here.
+    // Roster (agents) + kanban (tasks) are PER-OWNER and intentionally NOT merged:
+    // a teammate's agents/tasks would pollute this hive's registry/tasks and make
+    // the local orchestrator try to manage agents it can't reach. Each machine keeps
+    // its own roster + kanban; teammates' are viewed on demand from Supabase. Only
+    // the BLACKBOARD is shared (merged below), so `remote.agents`/`remote.tasks` are
+    // ignored here.
     try {
       if (remote.board) this.mergeBoard(root, remote.board);
     } catch { /* best-effort per file */ }
-  }
-
-  /** LWW + ADDITIVE merge of remote agent rows into registry.json. Preserves
-   *  godId and any local-only agents; only writes/commits when something changed. */
-  private mergeAgents(root: string, rows: Record<string, unknown>[]): void {
-    const reg = this.registry();
-    let changed = false;
-    for (const row of rows) {
-      const id = typeof row.agent_id === 'string' ? row.agent_id : null;
-      if (!id) continue;
-      const remoteAt =
-        typeof row.updated_at === 'number'
-          ? row.updated_at
-          : typeof row.last_seen === 'number'
-          ? row.last_seen
-          : 0;
-      const local = reg.agents[id];
-      const localAt = local && typeof local.lastSeen === 'number' ? local.lastSeen : 0;
-      // ADDITIVE + LWW: accept only a brand-new id or a STRICTLY newer remote.
-      if (local && remoteAt <= localAt) continue;
-
-      const lastSeen =
-        typeof row.last_seen === 'number' ? row.last_seen : remoteAt || (local?.lastSeen ?? 0);
-      const merged: RegistryAgent = {
-        // Preserve local-only fields (provider, capabilities, sessionId, …) when
-        // present; remote scalars win since remote is strictly newer here.
-        ...(local ?? ({} as RegistryAgent)),
-        id,
-        name: typeof row.name === 'string' ? row.name : local?.name ?? id,
-        role: typeof row.role === 'string' ? row.role : local?.role,
-        status: (this.coerceStatus(row.status) ?? local?.status ?? 'idle'),
-        cwd: typeof row.cwd === 'string' ? row.cwd : local?.cwd ?? '',
-        isGod: typeof row.is_god === 'boolean' ? row.is_god : local?.isGod,
-        archived: typeof row.archived === 'boolean' ? row.archived : local?.archived,
-        lastSeen
-      };
-      reg.agents[id] = merged;
-      // Keep godId coherent if a remote agent claims the role; never clear it.
-      if (merged.isGod) reg.godId = id;
-      changed = true;
-    }
-    if (!changed) return;
-    this.atomicWriteJson(join(root, 'registry.json'), reg);
-    this.appendLog({ kind: 'sync-agents', count: rows.length });
-    this.commit('hive: sync agents (remote)');
-  }
-
-  /** Map a possibly-unknown remote status onto the RegistryAgent union; returns
-   *  undefined for anything unrecognized so the caller can fall back to local. */
-  private coerceStatus(v: unknown): RegistryAgent['status'] | undefined {
-    return v === 'idle' || v === 'working' || v === 'blocked' || v === 'gone' ? v : undefined;
   }
 
   /** LWW overwrite of board.md — only when the remote stamp is strictly newer
