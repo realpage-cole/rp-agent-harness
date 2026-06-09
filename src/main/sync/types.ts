@@ -72,6 +72,12 @@ export interface SupabaseAuthLike {
     data: { user: { id: string; email?: string } | null };
     error: { message: string } | null;
   }>;
+  /** The current (possibly auto-refreshed) in-memory session. Read by the data
+   *  client's `accessToken` callback to get the freshest token. */
+  getSession(): Promise<{
+    data: { session: { access_token: string } | null } | null;
+    error: { message: string } | null;
+  }>;
 }
 
 /** A Supabase Realtime channel. Loosely typed so it compiles without the

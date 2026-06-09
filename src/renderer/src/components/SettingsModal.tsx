@@ -415,6 +415,12 @@ export function SettingsModal({ config, onClose }: SettingsModalProps) {
   const signIn = async () => {
     setAuthBusy(true); setAuthNote('');
     try {
+      // Persist url/key (+ enable) FIRST: signIn() brings the client up via the
+      // main-process start(), which reads config. Without this, a user who typed
+      // url/key but never hit Save/Start would sign in against an unconfigured
+      // client. (A workspace id isn't needed yet — you create/join one next.)
+      await window.cth.syncSetConfig(syncPatch(true));
+      setSyncEnabled(true);
       const res = await cthAuth().syncSignIn?.(authEmail.trim(), authPassword);
       if (res?.ok) {
         setAuthPassword(''); // never keep the password around after a sign-in

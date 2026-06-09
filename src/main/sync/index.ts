@@ -36,7 +36,8 @@ import {
   type AuthState,
   SYNC_INTERVAL_MS,
   STATE_CATCHUP_MS,
-  K_MACHINE
+  K_MACHINE,
+  K_AUTH_SESSION
 } from './types';
 import { errMsg } from './io';
 import { pushAppendOnly } from './push';
@@ -71,7 +72,13 @@ export interface SyncManagerDeps {
 }
 
 export class SyncManager {
+  /** The DATA client — built with the `accessToken` callback so REST + realtime
+   *  always carry the user's token. Everything except auth ops goes through it. */
   private client: SupabaseLike | null = null;
+  /** The AUTH client — a normal client used ONLY for signInWithPassword/setSession/
+   *  signOut (the `accessToken` option disables auth, so it can't live on the data
+   *  client). Its live session feeds the data client's accessToken callback. */
+  private authClient: SupabaseLike | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Phase 3: the 30s shared-state catch-up poll (covers dropped realtime). */
   private stateTimer: ReturnType<typeof setInterval> | null = null;
@@ -109,6 +116,15 @@ export class SyncManager {
 
   private configured(s = this.settings()): boolean {
     return !!s.url && !!s.anonKey && !!s.workspaceId;
+  }
+
+  /** Gate for bringing the CLIENT up — and therefore for signIn + workspace
+   *  create/join: only url + anonKey are needed, NOT a workspaceId. A workspace
+   *  id doesn't exist yet the first time (you sign in, THEN create/join one), so
+   *  requiring it here is the chicken-and-egg that blocks first sign-in. The sync
+   *  LOOPS stay gated on canRun() (which additionally needs workspaceId + signedIn). */
+  private canConnect(s = this.settings()): boolean {
+    return !!s.url && !!s.anonKey;
   }
 
   /** Phase 4 run gate for the push/pull/state/subscribe loops: configured (url +
@@ -150,6 +166,77 @@ export class SyncManager {
     return home ? join(home, 'hive') : null;
   }
 
+  // ─── client builder ──────────────────────────────────────────────────────────
+
+  /** Cached supabase-js createClient. Non-literal specifier keeps it an OPTIONAL
+   *  dependency — TS/Vite don't hard-resolve it, so the app compiles + boots even
+   *  before `npm install` lands the package; sync just stays inactive. */
+  private createClientFn: ((url: string, key: string, opts?: unknown) => SupabaseLike) | null = null;
+  private async loadCreateClient(): Promise<(url: string, key: string, opts?: unknown) => SupabaseLike> {
+    if (this.createClientFn) return this.createClientFn;
+    const moduleName = '@supabase/supabase-js';
+    const mod = (await import(/* @vite-ignore */ moduleName)) as {
+      createClient: (url: string, key: string, opts?: unknown) => SupabaseLike;
+    };
+    this.createClientFn = mod.createClient;
+    return mod.createClient;
+  }
+
+  /** realtime-js needs a WebSocket. Electron's MAIN process runs Node 20 (no global
+   *  WebSocket), so supabase-js throws on construction unless we hand it `ws` (a
+   *  transitive dep of realtime-js). Returns undefined when a native WebSocket
+   *  exists (Node 22+/future Electron) or `ws` can't be loaded — then the 30s
+   *  catch-up poll still syncs state without realtime. */
+  private async wsTransport(): Promise<unknown> {
+    if (typeof (globalThis as { WebSocket?: unknown }).WebSocket !== 'undefined') return undefined;
+    try {
+      const wsName = 'ws';
+      const wsMod = (await import(/* @vite-ignore */ wsName)) as { default?: unknown };
+      return wsMod.default ?? wsMod;
+    } catch { return undefined; }
+  }
+
+  /** The AUTH client: a normal client used ONLY for signInWithPassword/setSession/
+   *  signOut. autoRefreshToken keeps its in-memory session fresh; persistSession is
+   *  off (we persist the session ourselves, MAIN-side). */
+  private async buildAuthClient(s: SyncSettings): Promise<SupabaseLike> {
+    const createClient = await this.loadCreateClient();
+    const transport = await this.wsTransport();
+    return createClient(s.url, s.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: true },
+      realtime: { params: { eventsPerSecond: 1 }, ...(transport ? { transport } : {}) }
+    });
+  }
+
+  /** The DATA client: built with supabase-js's `accessToken` callback, which it
+   *  calls for EVERY REST + realtime request and NEVER overrides. This is the
+   *  reliable way to authenticate as the user — supabase-js's own session→header
+   *  propagation does NOT fire in the Electron main process, so without this, DB
+   *  calls go out as `anon` and every membership-scoped RLS policy denies them.
+   *  (Providing `accessToken` disables this client's own auth module — fine, all
+   *  auth ops use the auth client.) */
+  private async buildDataClient(s: SyncSettings): Promise<SupabaseLike> {
+    const createClient = await this.loadCreateClient();
+    const transport = await this.wsTransport();
+    return createClient(s.url, s.anonKey, {
+      accessToken: async () => this.currentAccessToken(),
+      realtime: { params: { eventsPerSecond: 1 }, ...(transport ? { transport } : {}) }
+    });
+  }
+
+  /** Resolve the current user access token for the data client's accessToken
+   *  callback: prefer the auth client's live (possibly auto-refreshed) session,
+   *  else the token we persisted at sign-in. Returns '' when signed out (anon) —
+   *  the loops are gated on signedIn, so data calls only fire once a token exists. */
+  private async currentAccessToken(): Promise<string> {
+    try {
+      const got = await this.authClient?.auth.getSession();
+      const tok = got?.data?.session?.access_token;
+      if (tok) return tok;
+    } catch { /* fall back to the persisted token */ }
+    return this.store.getKv<{ access_token?: string }>(K_AUTH_SESSION)?.access_token ?? '';
+  }
+
   // ─── lifecycle (mirrors startSlackServer/stopSlackServer) ────────────────────
 
   /** Bring sync up if enabled + configured. Lazily imports supabase-js so a
@@ -163,35 +250,25 @@ export class SyncManager {
   async start(): Promise<{ ok: boolean; error?: string }> {
     const s = this.settings();
     if (!s.enabled) return { ok: false, error: 'sync disabled' };
-    if (!this.configured(s)) return { ok: false, error: 'missing url, anon key, or workspace id' };
+    if (!this.canConnect(s)) return { ok: false, error: 'missing url or anon key' };
     this.stop();
     try {
-      // Non-literal specifier: keeps this an OPTIONAL dependency — TS/Vite don't
-      // statically resolve it, so the app compiles + boots even before
-      // `npm install` lands the package; sync just stays inactive until it's
-      // present. Externalized in main, so it require()s from node_modules at run.
-      const moduleName = '@supabase/supabase-js';
-      const mod = (await import(/* @vite-ignore */ moduleName)) as {
-        createClient: (url: string, key: string, opts?: unknown) => SupabaseLike;
-      };
-      // Phase 4: we manage the session ourselves (restoreSession/setSession) and
-      // persist it MAIN-side in store kv — so supabase-js must NOT also persist it
-      // (no renderer localStorage). autoRefreshToken on so long sessions survive.
-      this.client = mod.createClient(s.url, s.anonKey, {
-        auth: { persistSession: false, autoRefreshToken: true },
-        realtime: { params: { eventsPerSecond: 1 } }
-      });
+      // Auth client first (the data client's accessToken callback reads its session).
+      this.authClient = await this.buildAuthClient(s);
+      this.client = await this.buildDataClient(s);
     } catch (e) {
+      this.authClient = null;
       this.client = null;
       const error = `supabase client unavailable: ${errMsg(e)}`;
       this.lastError = error;
       return { ok: false, error };
     }
     this.lastError = null;
-    // Phase 4: restore a persisted session (if any) so a returning user is already
-    // authenticated; this resolves the tokenless auth snapshot used by the gate.
+    // Phase 4: restore a persisted session on the AUTH client (if any) so a
+    // returning user is already authenticated; the data client's accessToken
+    // callback then reads the live token. Resolves the tokenless auth snapshot.
     try {
-      this.auth = await auth.restoreSession(this.client, this.store);
+      this.auth = await auth.restoreSession(this.authClient, this.store);
     } catch (e) { this.lastError = errMsg(e); }
     // Only arm the loops when signed in AND configured AND workspaceId set; else
     // the client is up (signIn can be called) but the loops stay idle.
@@ -238,6 +315,7 @@ export class SyncManager {
   stop(): void {
     this.disarmLoops();
     this.client = null;
+    this.authClient = null;
   }
 
   // ─── Phase 4 auth ────────────────────────────────────────────────────────────
@@ -246,13 +324,14 @@ export class SyncManager {
    *  to auth.signIn (which persists the session MAIN-side), then (re)arms the
    *  loops if now runnable and broadcasts a fresh (tokenless) status. */
   async signIn(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
-    if (!this.client) {
+    if (!this.authClient || !this.client) {
       const r = await this.start();
-      if (!this.client) return { ok: false, error: r.error ?? 'sync not started' };
+      if (!this.authClient || !this.client) return { ok: false, error: r.error ?? 'sync not started' };
     }
     let res;
     try {
-      res = await auth.signIn(this.client, this.store, email, password);
+      // Auth ops run on the AUTH client (the data client has no auth module).
+      res = await auth.signIn(this.authClient, this.store, email, password);
     } catch (e) {
       const error = errMsg(e);
       this.lastError = error;
@@ -264,6 +343,9 @@ export class SyncManager {
     }
     this.auth = { signedIn: true, userId: res.userId ?? null, email: res.email ?? null };
     this.lastError = null;
+    // No client rebuild needed: auth.signIn persisted the session to kv and set it
+    // on the auth client, so the data client's accessToken callback now returns the
+    // user's token on every request — DB calls run as the authenticated user.
     if (this.canRun()) this.armLoops();
     this.deps.emit?.('sync:event', this.status());
     return { ok: true };
@@ -304,8 +386,8 @@ export class SyncManager {
   /** Sign out: clear the persisted session + in-memory auth, stop the loops, and
    *  broadcast. The client stays up so a new signIn can be issued. */
   async signOut(): Promise<void> {
-    if (this.client) {
-      try { await auth.signOut(this.client, this.store); }
+    if (this.authClient) {
+      try { await auth.signOut(this.authClient, this.store); }
       catch (e) { this.lastError = errMsg(e); }
     }
     this.auth = { signedIn: false, userId: null, email: null };
