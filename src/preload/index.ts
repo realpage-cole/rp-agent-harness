@@ -284,6 +284,49 @@ export interface TelemetrySnapshot {
   spans: Record<string, ToolSpan[]>;
 }
 
+/** The agent's composed system prompt, split for the dashboard editor.
+ *  `base` is the FULL system prompt EXCLUDING the operator block (read-only in
+ *  the UI); `custom` is the persisted operator-editable addendum ('' if none),
+ *  applied on the agent's next respawn. */
+export interface AgentPromptInfo {
+  base: string;
+  custom: string;
+}
+
+/** One tool invocation with its FULL input/output payload, mined from the
+ *  agent's Claude Code transcript (the live span buffer has no payloads).
+ *  `title` is a one-line summary: bash→the command; read/write/edit→the file
+ *  path; else the tool name. `input`/`output` are capped at 50000 chars each
+ *  (`truncated` is true when either was cut). Returned newest-first. */
+export interface TraceEvent {
+  id: string;
+  ts: number;
+  tool: string;
+  title: string;
+  input: string;
+  output: string;
+  success: boolean;
+  durationMs?: number;
+  truncated: boolean;
+}
+
+/** All-time cost totals (this machine) aggregated from <hive>/cost-ledger.jsonl.
+ *  `tokens` = input+output+cacheRead+cacheCreation. `byAgent[id].model` is that
+ *  agent's most-recently-seen model (max ts), or null. */
+export interface CostTotals {
+  byAgent: Record<string, {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreation: number;
+    tokens: number;
+    usd: number;
+    model: string | null;
+  }>;
+  byModel: Record<string, { tokens: number; usd: number }>;
+  total: { tokens: number; usd: number };
+}
+
 /** One captured user prompt from the SQLite command_history table. */
 export interface CommandHistoryEntry {
   id: number;
@@ -627,6 +670,32 @@ const api = {
    *  archives it automatically via pty:kill; this is the explicit primitive. */
   hiveSetArchived: (id: string, archived: boolean): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('hive:setArchived', id, archived),
+
+  // ─── Per-agent operator prompt + editable metadata ──────────────────────────
+  /** The agent's composed system prompt split into the read-only base and the
+   *  persisted operator-editable addendum (applied on the next respawn). */
+  getAgentPrompt: (id: string): Promise<AgentPromptInfo> =>
+    ipcRenderer.invoke('hive:getAgentPrompt', id),
+  /** Persist the operator's prompt addendum onto the agent's registry entry. */
+  setAgentPrompt: (id: string, custom: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('hive:setAgentPrompt', id, custom),
+  /** Merge editable per-agent metadata (name/role/capabilities) into the registry. */
+  updateAgentMeta: (
+    id: string,
+    patch: { name?: string; role?: string; capabilities?: string[] }
+  ): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('hive:updateAgentMeta', id, patch),
+
+  // ─── Full tool-call traces (transcript-mined payloads) ───────────────────────
+  /** Full tool-call payloads for an agent, newest-first (default limit 200),
+   *  mined from its Claude Code transcript. [] when unavailable. */
+  traceDetails: (agentId: string, limit?: number): Promise<TraceEvent[]> =>
+    ipcRenderer.invoke('hive:traceDetails', agentId, limit),
+
+  // ─── All-time cost totals (from <hive>/cost-ledger.jsonl) ────────────────────
+  /** All-time per-agent + per-model token/USD totals plus a grand total. */
+  costTotals: (): Promise<CostTotals> =>
+    ipcRenderer.invoke('hive:costTotals'),
 
   // ─── Slack integration (Slack message → the orchestrator's queue) ────────────
   /** Register a listener for inbound Slack messages; returns an unsubscribe fn.
