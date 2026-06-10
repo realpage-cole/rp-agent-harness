@@ -22,6 +22,8 @@ import { embed as ollamaEmbed } from './memory/ollama';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens } from './transcript';
+import { traceDetails } from './traceDetail';
+import { costTotalsFromUsage } from './costTotals';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
 import { SyncManager } from './sync';
@@ -1305,6 +1307,43 @@ ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
   hive.setArchived(id, archived === true);
   return { ok: true };
 });
+
+// ─── IPC: per-agent operator prompt + editable metadata ──────────────────────
+// The dashboard shows the full composed system prompt (base, read-only) plus an
+// operator-editable addendum (custom) applied on the agent's next respawn.
+ipcMain.handle('hive:getAgentPrompt', (_evt, id: unknown) =>
+  typeof id === 'string' ? hive.getAgentPrompt(id) : { base: '', custom: '' });
+ipcMain.handle('hive:setAgentPrompt', (_evt, id: unknown, custom: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
+  return hive.setAgentPrompt(id, typeof custom === 'string' ? custom : '');
+});
+ipcMain.handle('hive:updateAgentMeta', (_evt, id: unknown, patch: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
+  const p = (patch ?? {}) as { name?: unknown; role?: unknown; capabilities?: unknown };
+  return hive.updateAgentMeta(id, {
+    name: typeof p.name === 'string' ? p.name : undefined,
+    role: typeof p.role === 'string' ? p.role : undefined,
+    capabilities: Array.isArray(p.capabilities)
+      ? p.capabilities.filter((c): c is string => typeof c === 'string')
+      : undefined
+  });
+});
+
+// ─── IPC: full tool-call traces (transcript-mined payloads) ──────────────────
+// The live span buffer carries only metadata; this mines the agent's newest
+// Claude Code transcript for the full input/output of each tool call.
+ipcMain.handle('hive:traceDetails', (_evt, agentId: unknown, limit: unknown) => {
+  if (typeof agentId !== 'string') return [];
+  return traceDetails(
+    agentId,
+    (id) => hive.registry().agents[id]?.cwd ?? null,
+    (id) => telemetry.getAgentSessionId(id),
+    typeof limit === 'number' ? limit : 200
+  );
+});
+
+// ─── IPC: session cost totals (live per-agent usage from the OTel collector) ─
+ipcMain.handle('hive:costTotals', () => costTotalsFromUsage(telemetry.snapshot().usage));
 
 // ─── IPC: shared semantic memory (Ollama embeddings + Supabase pgvector) ─────
 ipcMain.handle('hive:memoryStatus', () => { memory.resetProbe(); return memory.status(); });

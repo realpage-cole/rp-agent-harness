@@ -94,7 +94,7 @@ export interface QueuedMessage {
   slack?: { channel: string; thread_ts: string };
 }
 
-export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces';
+export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces' | 'prompt' | 'config';
 
 /** Lifecycle of the god agent (orchestrator) bootstrap on launch.
  *  'booting' until its PTY is confirmed live, then 'ready' (or 'failed' if the
@@ -337,7 +337,7 @@ const initialSidebarWidth = (() => {
 const initialSidebarTab: SidebarTab = (() => {
   try {
     const v = window.localStorage.getItem(LS_SIDEBAR_TAB);
-    if (v === 'files' || v === 'terminal' || v === 'messages' || v === 'traces') return v;
+    if (v === 'files' || v === 'terminal' || v === 'messages' || v === 'traces' || v === 'prompt' || v === 'config') return v;
   } catch { /* noop */ }
   return 'terminal';
 })();
@@ -530,4 +530,58 @@ export const useStore = create<State>((set) => ({
 
 export function selectedAgent(s: State): Agent | undefined {
   return s.agents.find(a => a.id === s.selectedId);
+}
+
+/** Kill an agent's PTY and re-spawn it with the SAME agent id (so its memory,
+ *  inbox and registry entry reattach), applying an optional model override.
+ *  Shared by the PROMPT and CONFIG tabs so the respawn flow lives in one place —
+ *  mirrors CommandCenterPanel.restartWithModel. The newly-persisted operator
+ *  prompt / registry meta are read from disk by the main process at spawn, so a
+ *  respawn is all it takes to apply them.
+ *
+ *  Pass `model: undefined` to keep the agent's current model. The store's
+ *  updateAgent is applied via the passed setter so callers don't import the hook
+ *  twice. Returns { ok } so callers can surface failures. */
+export async function respawnAgent(
+  agent: Agent,
+  opts?: { model?: string | undefined; updateModel?: boolean }
+): Promise<{ ok: boolean; error?: string }> {
+  if (!agent.ptyId) return { ok: false, error: 'agent has no live PTY' };
+  const updateAgent = useStore.getState().updateAgent;
+  try {
+    // Lazy import to avoid a static cycle (config.ts → store.ts is fine, but keep
+    // the dispose import local to the renderer-component graph this helper serves).
+    const [{ inferAgentProvider, buildSpawnCommand, tokenizeCommand }, { disposeTerminal }] =
+      await Promise.all([
+        import('@/store/config'),
+        import('@/components/terminalPool')
+      ]);
+    const cfg = await window.cth.getConfig();
+    const model = opts?.updateModel ? opts.model : agent.model;
+    await window.cth.killPty(agent.ptyId);
+    disposeTerminal(agent.ptyId);
+    const provider = inferAgentProvider(agent.command, agent.provider);
+    const command = buildSpawnCommand(cfg, model, provider);
+    const [exe, ...args] = tokenizeCommand(command.trim());
+    const hive = agent.isGod
+      ? { id: agent.id, name: agent.name, cwd: agent.cwd, provider, isGod: true, role: 'orchestrator (god)' }
+      : agent.isAssistant
+      ? { id: agent.id, name: agent.name, cwd: agent.cwd, provider, isAssistant: true, role: "orchestrator's prep assistant" }
+      : { id: agent.id, name: agent.name, cwd: agent.cwd, provider, role: agent.description };
+    const res = await window.cth.spawnPty({
+      id: agent.ptyId, cwd: agent.cwd, command: exe, args, provider, cols: 100, rows: 30, hive
+    });
+    if (res.ok) {
+      updateAgent(agent.id, {
+        command: command.trim(),
+        provider,
+        ...(opts?.updateModel ? { model } : {}),
+        status: 'idle',
+        action: 'restarting…'
+      });
+    }
+    return res;
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }

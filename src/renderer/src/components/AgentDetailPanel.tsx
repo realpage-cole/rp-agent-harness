@@ -11,6 +11,8 @@ import { SidebarTabs } from './SidebarTabs';
 import { FilesTab } from './FilesTab';
 import { ThreadsPanel } from './ThreadsPanel';
 import { ToolWaterfall } from './ToolWaterfall';
+import { PromptTab } from './PromptTab';
+import { ConfigTab } from './ConfigTab';
 import { AgentControlStrip } from './AgentControlStrip';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
@@ -183,6 +185,14 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
 
         {sidebarTab === 'traces' && (
           <ToolWaterfall agentId={agent.id} />
+        )}
+
+        {sidebarTab === 'prompt' && (
+          <PromptTab agent={agent} />
+        )}
+
+        {sidebarTab === 'config' && (
+          <ConfigTab agent={agent} />
         )}
       </div>
     </PixelPanel>

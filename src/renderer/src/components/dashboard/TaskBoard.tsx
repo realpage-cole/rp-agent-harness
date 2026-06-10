@@ -1,6 +1,7 @@
-import { useStore } from '@/store/store';
+import { useStore, type Agent } from '@/store/store';
 import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
+import { Avatar } from '@/components/Avatar';
 import { useHiveTasks, useTeammateTasks, type DashboardTask, type TaskStatus } from '@/hooks/useHiveTasks';
 
 /** Column order + presentation. Colors reuse the status taxonomy semantics:
@@ -11,6 +12,49 @@ const COLUMNS: Array<{ status: TaskStatus; label: string; accent: string }> = [
   { status: 'blocked', label: 'Blocked', accent: 'var(--cth-coral)' },
   { status: 'done', label: 'Done', accent: 'var(--cth-mint)' }
 ];
+
+/** Live status → dot color. Lets a "doing" card read as actively-working (sky),
+ *  warming-up (lemon), blocked (coral), done (mint), or idle/gone (muted) at a
+ *  glance — the same status taxonomy the roster badges use. */
+const STATUS_DOT: Record<string, string> = {
+  working: 'var(--cth-sky)', thinking: 'var(--cth-sky)',
+  compacting: 'var(--cth-lemon)', looping: 'var(--cth-lemon)', waiting: 'var(--cth-lemon)',
+  blocked: 'var(--cth-coral)', success: 'var(--cth-mint)',
+  idle: 'var(--cth-ink-300)', ghost: 'var(--cth-ink-300)', gone: 'var(--cth-ink-300)'
+};
+function statusDot(status?: string): string {
+  return (status && STATUS_DOT[status]) || 'var(--cth-ink-300)';
+}
+
+/**
+ * Compact "who's on this" widget for a task card: the assignee's avatar + a live
+ * status dot + name. The assignee is the agent the orchestrator dispatched the
+ * task to (and never clears), so this answers "who is doing it" for a `doing`
+ * card and "who did it" for a `done` one — using data already maintained, no new
+ * per-task field. `agent` is undefined for a teammate's board (their roster isn't
+ * in the local store): we then show the raw id with no live status dot.
+ */
+function AgentChip({ agent, idFallback }: { agent?: Agent; idFallback: string }) {
+  const name = agent?.name ?? idFallback;
+  return (
+    <span
+      title={agent ? `${name} · ${agent.status}` : name}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0, maxWidth: '100%' }}
+    >
+      <Avatar name={name} accent={agent?.accent ?? 'sky'} size={16} />
+      {agent && (
+        <span style={{
+          width: 6, height: 6, flexShrink: 0, borderRadius: '50%',
+          background: statusDot(agent.status), boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+        }} />
+      )}
+      <span style={{
+        fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-700, var(--cth-ink-500))',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+      }}>{name}</span>
+    </span>
+  );
+}
 
 /**
  * Kanban view of the hive ledger. Driven by the shared view toggle (store
@@ -31,9 +75,6 @@ export function TaskBoard() {
   const requestCommandCenterTab = useStore((s) => s.requestCommandCenterTab);
   // Only your own board navigates to the (local) Command Center tasks tab.
   const openTasks = viewingTeammate ? undefined : () => requestCommandCenterTab('tasks');
-
-  const nameFor = (id?: string): string | undefined =>
-    id ? (agents.find((a) => a.id === id)?.name ?? id) : undefined;
 
   return (
     <PixelPanel
@@ -93,12 +134,17 @@ export function TaskBoard() {
                       }}>
                         {t.title}
                       </div>
-                      {(nameFor(t.assignee) || t.needsHuman) && (
-                        <div style={{
-                          marginTop: 2, fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-500)',
-                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                        }}>
-                          {t.needsHuman ? 'needs you' : nameFor(t.assignee)}
+                      {(t.assignee || t.needsHuman) && (
+                        <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          {t.assignee && (
+                            <AgentChip agent={agents.find((a) => a.id === t.assignee)} idFallback={t.assignee} />
+                          )}
+                          {t.needsHuman && (
+                            <span style={{
+                              marginLeft: 'auto', flexShrink: 0,
+                              fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-coral)', whiteSpace: 'nowrap'
+                            }}>needs you</span>
+                          )}
                         </div>
                       )}
                     </button>

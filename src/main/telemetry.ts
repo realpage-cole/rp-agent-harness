@@ -202,6 +202,21 @@ export class TelemetryCollector {
     return this.spans.get(agentId)?.slice() ?? [];
   }
 
+  /** The agent's most-recent live session id (max ts), or null when telemetry has
+   *  seen none. Lets the traces view read the RIGHT transcript when several agents
+   *  share one cwd — Claude keeps one project dir per cwd with a separate
+   *  `<sessionId>.jsonl` per session, so "newest file" alone leaks across agents. */
+  getAgentSessionId(agentId: string): string | null {
+    const ids = this.agentSessions.get(agentId);
+    if (!ids || ids.size === 0) return null;
+    let best: { id: string; ts: number } | null = null;
+    for (const id of ids) {
+      const ts = this.sessions.get(id)?.ts ?? 0;
+      if (!best || ts >= best.ts) best = { id, ts };
+    }
+    return best?.id ?? null;
+  }
+
   /** Everything the renderer needs on cold start (it missed the live pushes). */
   snapshot(): TelemetrySnapshot {
     const usage: AgentUsageSample[] = [];

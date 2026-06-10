@@ -115,6 +115,11 @@ export interface AgentMeta {
    *  the orchestrator. Send-only: excluded from broadcast fan-out so it never
    *  drains an inbox. */
   isAssistant?: boolean;
+  /** Operator-editable system-prompt addendum, set from the dashboard. Persisted
+   *  on the registry entry and appended LAST to the composed system prompt at
+   *  spawn (see injectedPrompt). PRESERVED across respawns (ensureAgent merge) so
+   *  a respawn never wipes the operator's edits. '' / undefined = none. */
+  customPrompt?: string;
 }
 
 export interface RegistryAgent extends AgentMeta {
@@ -213,6 +218,11 @@ export class HiveManager {
    *  collector is bound (telemetry.ts). null = telemetry off → no OTel env is
    *  injected at spawn (the transcript reconciler remains the cost source). */
   private _otelEndpoint: string | null = null;
+  /** The semanticMemory flag last passed to ensureAgent — so getAgentPrompt's
+   *  computed `base` matches what was actually injected at the last spawn. The
+   *  flag is hive-wide (driven by config.semanticMemory), so a single value is
+   *  representative; defaults false until the first spawn. */
+  private _semanticMemory = false;
   /** Point newly-spawned agents at the live telemetry collector. Call after the
    *  collector starts; only affects spawns made afterwards. */
   setOtelEndpoint(url: string | null): void {
@@ -309,6 +319,7 @@ export class HiveManager {
     const root = this.root();
     if (!root) return { args: [], env: {} };
     this.ensureHive();
+    this._semanticMemory = opts.semanticMemory ?? false;
 
     const dir = this.agentDir(meta.id);
     mkdirSync(join(dir, 'inbox', '.done'), { recursive: true });
@@ -327,10 +338,14 @@ export class HiveManager {
 
     // upsert registry
     const reg = this.registry();
+    const existing = reg.agents[meta.id];
     reg.agents[meta.id] = {
       ...meta,
       capabilities: meta.capabilities ?? [],
       role: meta.role ?? (meta.isGod ? 'orchestrator' : 'agent'),
+      // PRESERVE the operator's prompt addendum across respawns: a (re)spawn that
+      // doesn't carry a customPrompt must NOT wipe the one the operator saved.
+      customPrompt: meta.customPrompt ?? existing?.customPrompt,
       status: 'idle',
       // A (re)spawn always means a live terminal — clear any prior archived flag.
       archived: false,
@@ -570,7 +585,7 @@ export class HiveManager {
       ? 'You are the orchestrator\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in the orchestrator\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that the orchestrator can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to the orchestrator.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
     const guardrailsLine = 'Guardrails: a circuit breaker watches the team — a "Circuit breaker: steer/constrain" message means you are looping or overspending, so STOP repeating, summarize what you tried, and follow it. Be token-frugal (a team-wide or per-agent token budget can pause you). The shared plan has two parts: board.md (freeform; god is the sole scribe) and tasks.json (structured kanban — todo/doing/blocked/done).';
-    return [
+    const base = [
       `You are "${meta.name}" (${meta.id}), an autonomous agent in a collaborating hive of Claude agents.`,
       `Your private workspace is ${dir}. The shared hive is ${root}. Full protocol: ${root}/PROTOCOL.md.`,
       '',
@@ -584,6 +599,90 @@ export class HiveManager {
       godLine,
       `Env vars available to you: AGENT_ID, AGENT_NAME, HIVE_ROOT, AGENT_DIR.`
     ].filter(Boolean).join('\n');
+    // Operator addendum goes LAST, after the volatile-free assembled lines. It is
+    // stable for an agent's lifetime (only changes on an explicit dashboard edit
+    // + respawn), so it does not violate the prompt-cache invariant above.
+    const custom = typeof meta.customPrompt === 'string' ? meta.customPrompt.trim() : '';
+    if (custom) {
+      return base + '\n\nOPERATOR INSTRUCTIONS (added via the dashboard — follow these):\n' + meta.customPrompt;
+    }
+    return base;
+  }
+
+  // — operator prompt + metadata (dashboard-editable) —
+
+  /**
+   * The agent's composed system prompt split for the dashboard editor:
+   *  - base   = the FULL assembled system prompt EXCLUDING the operator block
+   *             (computed via the real injectedPrompt with customPrompt forced
+   *             to '' — so the UI shows EXACTLY what would be injected sans
+   *             addendum). Read-only in the UI.
+   *  - custom = the persisted operator addendum ('' if none).
+   * Returns empty strings when the hive is disabled or the agent is unknown.
+   */
+  getAgentPrompt(id: string): { base: string; custom: string } {
+    const root = this.root();
+    if (!root) return { base: '', custom: '' };
+    const meta = this.registry().agents[id];
+    if (!meta) return { base: '', custom: '' };
+    const semanticMemory = !!this._semanticMemory;
+    // Compute base off a meta clone with the addendum stripped, reusing the REAL
+    // builder so base never drifts from what's actually injected.
+    const base = this.injectedPrompt(
+      { ...meta, customPrompt: '' },
+      this.agentDir(id),
+      root,
+      semanticMemory
+    );
+    return { base, custom: meta.customPrompt ?? '' };
+  }
+
+  /** Persist the operator's prompt addendum onto the agent's registry entry and
+   *  commit. Applied on the agent's next (re)spawn via injectedPrompt. */
+  setAgentPrompt(id: string, custom: string): { ok: boolean; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
+    try {
+      const reg = this.registry();
+      const agent = reg.agents[id];
+      if (!agent) return { ok: false, error: `unknown agent: ${id}` };
+      agent.customPrompt = typeof custom === 'string' ? custom : '';
+      agent.lastSeen = Date.now();
+      this.atomicWriteJson(join(root, 'registry.json'), reg);
+      this.appendLog({ kind: 'prompt', agentId: id });
+      this.commit(`hive: prompt ${id}`);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** Merge editable per-agent metadata (name/role/capabilities) into the registry
+   *  entry and commit. Live where the field is read live (registry); name/role
+   *  take effect immediately, the prompt-baked identity refreshes on respawn. */
+  updateAgentMeta(
+    id: string,
+    patch: { name?: string; role?: string; capabilities?: string[] }
+  ): { ok: boolean; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
+    try {
+      const reg = this.registry();
+      const agent = reg.agents[id];
+      if (!agent) return { ok: false, error: `unknown agent: ${id}` };
+      if (typeof patch?.name === 'string' && patch.name.trim()) agent.name = patch.name;
+      if (typeof patch?.role === 'string') agent.role = patch.role;
+      if (Array.isArray(patch?.capabilities)) {
+        agent.capabilities = patch.capabilities.filter((c): c is string => typeof c === 'string');
+      }
+      agent.lastSeen = Date.now();
+      this.atomicWriteJson(join(root, 'registry.json'), reg);
+      this.appendLog({ kind: 'meta', agentId: id });
+      this.commit(`hive: meta ${id}`);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   // — messaging —
