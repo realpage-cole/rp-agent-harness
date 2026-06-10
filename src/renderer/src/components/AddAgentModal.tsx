@@ -57,19 +57,37 @@ export interface AddAgentModalProps {
 
 export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const addAgent = useStore(s => s.addAgent);
+  // A non-null prefill (from the Agent Library's "Add to my hive") seeds the form.
+  // Captured once on mount; cleared when the modal closes.
+  const prefill = useStore(s => s.addAgentPrefill);
+  const setAddAgentPrefill = useStore(s => s.setAddAgentPrefill);
 
   // Default provider follows whatever the global default command is (claude
   // unless the user reconfigured it); the model only carries over for Claude.
-  const initialProvider = inferAgentProvider(config.defaultCommand);
-  const initialModel = isClaudeProvider(initialProvider) ? config.defaultModel : undefined;
+  // A prefill always targets a Claude agent (the published catalog is Claude-only).
+  const initialProvider: AgentProvider = prefill ? 'claude' : inferAgentProvider(config.defaultCommand);
+  const initialModel = prefill
+    ? (prefill.model ?? config.defaultModel)
+    : (isClaudeProvider(initialProvider) ? config.defaultModel : undefined);
+  // The accent from a SharedAgent is a loose string; only adopt it when it's a
+  // real accent name, otherwise fall back to the default.
+  const prefillAccent: AccentColorName =
+    prefill && ACCENTS.includes(prefill.accent as AccentColorName)
+      ? (prefill.accent as AccentColorName)
+      : 'sky';
 
-  const [name, setName] = useState('Worker');
-  const [accent, setAccent] = useState<AccentColorName>('sky');
+  const [name, setName] = useState(prefill?.name ?? 'Worker');
+  const [accent, setAccent] = useState<AccentColorName>(prefillAccent);
   const [cwd, setCwd] = useState<string>(config.registeredRepos[0] ?? '');
   const [provider, setProvider] = useState<AgentProvider>(initialProvider);
   const [model, setModel] = useState<string | undefined>(initialModel);
   const [command, setCommand] = useState(buildSpawnCommand(config, initialModel, initialProvider));
-  const [description, setDescription] = useState('a fresh harness');
+  const [description, setDescription] = useState(prefill?.role ?? 'a fresh harness');
+  // Capabilities carried from the published agent → flow into the hive meta on
+  // spawn (and ride along on respawns via the registry).
+  const [prefillCapabilities] = useState<string[] | undefined>(prefill?.capabilities);
+  // The published operator-prompt addendum — applied AFTER spawn (setAgentPrompt).
+  const [prefillCustomPrompt] = useState<string | undefined>(prefill?.customPrompt);
 
   // Picking a model rebuilds the command; the command field stays editable for
   // power users (it's the source of truth for the actual spawn).
@@ -120,6 +138,13 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     else if (res.error !== 'cancelled') setError(res.error);
   };
 
+  // Closing the modal always clears any pending prefill so a later manual open
+  // starts clean.
+  const closeModal = () => {
+    setAddAgentPrefill(null);
+    onClose();
+  };
+
   const submit = async () => {
     setError(undefined);
     if (!name.trim()) { setError('Name is required'); return; }
@@ -152,13 +177,19 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         provider,
         cwd,
         role: description.trim() || undefined,
-        capabilities: selectedPreset?.capabilities
+        capabilities: selectedPreset?.capabilities ?? prefillCapabilities
       }
     });
     if (!spawnRes.ok) {
       setBusy(false);
       setError(spawnRes.error ?? 'spawn failed');
       return;
+    }
+
+    // A published agent carries an operator-prompt addendum — persist it onto the
+    // freshly-spawned agent so its next respawn applies it (mirrors the PROMPT tab).
+    if (prefillCustomPrompt) {
+      await window.cth.setAgentPrompt(id, prefillCustomPrompt).catch(() => { /* best-effort */ });
     }
 
     const agent: Agent = {
@@ -182,12 +213,12 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     };
     addAgent(agent);
     setBusy(false);
-    onClose();
+    closeModal();
   };
 
   return (
     <div
-      onClick={onClose}
+      onClick={closeModal}
       style={{
         position: 'fixed', inset: 0,
         background: 'rgba(26, 19, 32, 0.6)',
@@ -438,7 +469,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
             )}
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
-              <PixelButton variant="ghost" size="md" onClick={onClose} disabled={busy}>cancel</PixelButton>
+              <PixelButton variant="ghost" size="md" onClick={closeModal} disabled={busy}>cancel</PixelButton>
               <PixelButton variant="primary" size="md" onClick={submit} disabled={busy}>
                 {busy ? 'spawning...' : 'spawn'}
               </PixelButton>

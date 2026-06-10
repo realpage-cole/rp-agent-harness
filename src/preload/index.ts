@@ -371,6 +371,78 @@ export interface SyncStatus {
   auth: { signedIn: boolean; userId: string | null; email: string | null };
 }
 
+// ─── Notepad shared surface (team pulse / agent library / pinned links) ──────
+
+/** A teammate's "team pulse" snippet — one row per owner machine. `isMe` flags
+ *  this machine's own row. */
+export interface MemberNote {
+  machineId: string;
+  ownerLabel: string | null;
+  body: string;
+  updatedAt: number;
+  isMe: boolean;
+}
+
+/** A published agent definition from the shared catalog (the Agent Library). */
+export interface SharedAgent {
+  id: string;
+  name: string;
+  role: string | null;
+  capabilities: string[];
+  model: string | null;
+  accent: string | null;
+  customPrompt: string | null;
+  why: string | null;
+  authorLabel: string | null;
+  createdAt: string | null;
+}
+
+/** The fields a publisher supplies when adding an agent to the shared catalog. */
+export interface SharedAgentInput {
+  name: string;
+  role?: string;
+  capabilities?: string[];
+  model?: string;
+  accent?: string;
+  customPrompt?: string;
+}
+
+/** A pinned link from the shared resources list. */
+export interface Resource {
+  id: string;
+  label: string;
+  url: string;
+  note: string | null;
+  authorLabel: string | null;
+  createdAt: string | null;
+}
+
+/** The fields supplied when pinning a shared resource. */
+export interface ResourceInput {
+  label: string;
+  url: string;
+  note?: string;
+}
+
+/** One attributed entry on a Notepad board (agent or human). `isMine` flags the
+ *  entries this machine authored (so the renderer can style/own them). */
+export interface BoardEntry {
+  id: string;
+  board: 'agent' | 'human';
+  body: string;
+  authorKind: 'agent' | 'human';
+  authorLabel: string | null;
+  agentId: string | null;
+  createdAt: string | null;
+  isMine: boolean;
+}
+
+/** The fields a human supplies when posting to a Notepad board (the add box). */
+export interface BoardEntryInput {
+  board: 'agent' | 'human';
+  body: string;
+}
+
 const api = {
   version: __APP_VERSION__,
 
@@ -454,6 +526,10 @@ const api = {
   // ─── Hive (multi-agent coordination) ─────────────────────────────────────
   hiveRegistry: (): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry'),
   hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
+  /** Overwrite the shared blackboard (the Notepad's Scratchpad). Writes board.md
+   *  + bumps the LWW stamps so the next sync beat pushes it. */
+  setBoard: (body: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('hive:setBoard', body),
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
@@ -794,6 +870,46 @@ const api = {
   /** Fetch a teammate's kanban (read-only); same `{ tasks: [...] }` shape as hiveTasks(). */
   syncTeammateTasks: (machineId: string): Promise<{ tasks: unknown[] }> =>
     ipcRenderer.invoke('sync:teammateTasks', machineId),
+  // ─── Notepad shared surface (team pulse / agent library / pinned links) ────
+  // All read methods return [] when sync is off or signed out (best-effort).
+  /** Every teammate's "team pulse" snippet (incl. this machine, flagged isMe). */
+  getMemberNotes: (): Promise<MemberNote[]> =>
+    ipcRenderer.invoke('notepad:memberNotes'),
+  /** Set THIS user's pulse (writes <hive>/pulse.md; pushed to member_notes next beat). */
+  setMyPulse: (body: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('notepad:setMyPulse', body),
+  /** The shared agent catalog for this workspace, newest first. */
+  listSharedAgents: (): Promise<SharedAgent[]> =>
+    ipcRenderer.invoke('notepad:listSharedAgents'),
+  /** Publish an agent definition to the shared catalog (written immediately). */
+  publishAgent: (input: SharedAgentInput, why: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('notepad:publishAgent', input, why),
+  /** Remove a published agent from the shared catalog by its id. */
+  unpublishAgent: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('notepad:unpublishAgent', id),
+  /** The shared pinned-links for this workspace, newest first. */
+  listResources: (): Promise<Resource[]> =>
+    ipcRenderer.invoke('notepad:listResources'),
+  /** Pin a shared resource (written immediately). */
+  addResource: (input: ResourceInput): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('notepad:addResource', input),
+  /** Remove a pinned resource by its id. */
+  removeResource: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('notepad:removeResource', id),
+  // ─── Notepad boards (agent board + human board) ────────────────────────────
+  // Read returns [] when sync is off/signed out. The add path is HUMAN-authored
+  // (main forces author_kind 'human'); the agent board is filled by the harness
+  // THOUGHTS service. Humans may delete entries on either board.
+  /** One board's entries for this workspace, newest first. */
+  listBoardEntries: (board: 'agent' | 'human'): Promise<BoardEntry[]> =>
+    ipcRenderer.invoke('notepad:listBoardEntries', board),
+  /** Post a HUMAN entry to a board (written immediately; author forced to human). */
+  addBoardEntry: (input: BoardEntryInput): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('notepad:addBoardEntry', input),
+  /** Remove a board entry by its id. */
+  removeBoardEntry: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('notepad:removeBoardEntry', id),
+
   /** Subscribe to sync status pushes (emitted when a pull lands new memory);
    *  returns an unsubscribe fn. */
   onSyncEvent: (cb: (s: SyncStatus) => void): (() => void) => {

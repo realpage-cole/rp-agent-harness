@@ -42,7 +42,14 @@ import {
 import { errMsg } from './io';
 import { pushAppendOnly } from './push';
 import { pushMemory, pullMemory, matchMemoryChunks, recentMemoryChunks, type MemoryChunkHit } from './memory';
-import { pushState, pullStateOnce, subscribeState, listHiveOwners, fetchTeammateAgents, fetchTeammateTasks, type HiveOwner, type TeammateAgent } from './state';
+import {
+  pushState, pullStateOnce, subscribeState, listHiveOwners, fetchTeammateAgents, fetchTeammateTasks,
+  pushMemberNote, listMemberNotes, listSharedAgents, insertSharedAgent, deleteSharedAgent,
+  listResources, insertResource, deleteResource,
+  listBoardEntries, insertBoardEntry, deleteBoardEntry,
+  type HiveOwner, type TeammateAgent, type MemberNoteRow, type SharedAgentRow, type ResourceRow,
+  type BoardEntryRow
+} from './state';
 import * as auth from './auth';
 
 export type {
@@ -385,6 +392,198 @@ export class SyncManager {
     } catch (e) { this.lastError = errMsg(e); return []; }
   }
 
+  /** The team-pulse body to push this beat: the hive's pulse.md, or a short
+   *  derived fallback ("<N> agents · <M> tasks doing") when it's empty/missing, so
+   *  a teammate never sees a blank pulse. Reads the hive bridge (gated by caller). */
+  private pulseBody(): string {
+    const hive = this.deps.hive;
+    if (!hive) return '';
+    let body = '';
+    try { body = (hive.pulse() ?? '').trim(); } catch { body = ''; }
+    if (body) return body;
+    try {
+      const rows = hive.readStateRows();
+      const agents = (rows.agents ?? []).filter((a) => a.archived !== true).length;
+      const doing = (rows.tasks ?? []).filter((t) => t.status === 'doing').length;
+      return `${agents} agent${agents === 1 ? '' : 's'} · ${doing} task${doing === 1 ? '' : 's'} doing`;
+    } catch {
+      return '';
+    }
+  }
+
+  // ─── Notepad shared surface (team pulse / agent library / pinned links) ──────
+
+  /** Every teammate's "team pulse" snippet in this workspace (incl. this machine,
+   *  flagged isMe). Read-only; gated on a signed-in, configured client. []. */
+  async listMemberNotes(): Promise<MemberNoteRow[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await listMemberNotes(this.client, s.workspaceId, this.machineId());
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** The shared agent catalog for this workspace, newest first. []. */
+  async listSharedAgents(): Promise<SharedAgentRow[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await listSharedAgents(this.client, s.workspaceId);
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Publish an agent definition to the shared catalog (random identity_id,
+   *  author_label = email, author_machine = this machine). Written immediately
+   *  (not on the beat). Returns {ok, error?}. */
+  async publishAgent(
+    input: {
+      name: string; role?: string; capabilities?: string[];
+      model?: string; accent?: string; customPrompt?: string;
+    },
+    why: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false, error: 'sign in first' };
+    const s = this.settings();
+    if (!s.workspaceId) return { ok: false, error: 'no workspace' };
+    const name = typeof input?.name === 'string' ? input.name.trim() : '';
+    if (!name) return { ok: false, error: 'name required' };
+    const row: Record<string, unknown> = {
+      workspace_id: s.workspaceId,
+      identity_id: randomUUID(),
+      author_label: this.auth.email ?? null,
+      author_machine: this.machineId(),
+      name,
+      role: typeof input.role === 'string' && input.role ? input.role : null,
+      capabilities: Array.isArray(input.capabilities)
+        ? input.capabilities.filter((c): c is string => typeof c === 'string')
+        : null,
+      model: typeof input.model === 'string' && input.model ? input.model : null,
+      accent: typeof input.accent === 'string' && input.accent ? input.accent : null,
+      custom_prompt: typeof input.customPrompt === 'string' && input.customPrompt ? input.customPrompt : null,
+      why: typeof why === 'string' && why.trim() ? why.trim() : null,
+      updated_at: Date.now()
+    };
+    try {
+      return await insertSharedAgent(this.client, row);
+    } catch (e) { const error = errMsg(e); this.lastError = error; return { ok: false, error }; }
+  }
+
+  /** Remove a published agent from the shared catalog by its identity_id. */
+  async unpublishAgent(id: string): Promise<{ ok: boolean }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false };
+    const s = this.settings();
+    if (!s.workspaceId || !id) return { ok: false };
+    try {
+      return await deleteSharedAgent(this.client, s.workspaceId, id);
+    } catch (e) { this.lastError = errMsg(e); return { ok: false }; }
+  }
+
+  /** The shared pinned-links for this workspace, newest first. []. */
+  async listResources(): Promise<ResourceRow[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await listResources(this.client, s.workspaceId);
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Pin a shared resource (random resource_id, author_label = email). Written
+   *  immediately (not on the beat). Returns {ok}. */
+  async addResource(input: { label: string; url: string; note?: string }): Promise<{ ok: boolean }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false };
+    const s = this.settings();
+    if (!s.workspaceId) return { ok: false };
+    const label = typeof input?.label === 'string' ? input.label.trim() : '';
+    const url = typeof input?.url === 'string' ? input.url.trim() : '';
+    if (!label || !url) return { ok: false };
+    const row: Record<string, unknown> = {
+      workspace_id: s.workspaceId,
+      resource_id: randomUUID(),
+      label,
+      url,
+      note: typeof input.note === 'string' && input.note.trim() ? input.note.trim() : null,
+      author_label: this.auth.email ?? null,
+      updated_at: Date.now()
+    };
+    try {
+      return await insertResource(this.client, row);
+    } catch (e) { this.lastError = errMsg(e); return { ok: false }; }
+  }
+
+  /** Remove a pinned resource by its resource_id. */
+  async removeResource(id: string): Promise<{ ok: boolean }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false };
+    const s = this.settings();
+    if (!s.workspaceId || !id) return { ok: false };
+    try {
+      return await deleteResource(this.client, s.workspaceId, id);
+    } catch (e) { this.lastError = errMsg(e); return { ok: false }; }
+  }
+
+  // ─── Notepad boards (agent + human attributed entries) ─────────────────────
+
+  /** One Notepad board's entries for this workspace, newest first. `isMine` is
+   *  set on entries this machine authored. Read-only; gated on a signed-in,
+   *  configured client. Best-effort: []. */
+  async listBoardEntries(board: 'agent' | 'human'): Promise<BoardEntryRow[]> {
+    if (!this.client || !this.auth.signedIn) return [];
+    const s = this.settings();
+    if (!s.workspaceId) return [];
+    try {
+      return await listBoardEntries(this.client, s.workspaceId, board, this.machineId());
+    } catch (e) { this.lastError = errMsg(e); return []; }
+  }
+
+  /** Append an entry to a Notepad board. The HUMAN add box calls this with
+   *  authorKind:'human'; the harness THOUGHTS service calls it with
+   *  authorKind:'agent', board:'agent', agentId:'orchestrator'. Random entry_id,
+   *  author_label = the signed-in email, author_machine = this machine, updated_at
+   *  = now. Written immediately (not on the beat). Gated on a signed-in client +
+   *  a workspace id; best-effort — never throws. */
+  async appendBoardEntry(input: {
+    board: 'agent' | 'human';
+    body: string;
+    authorKind: 'agent' | 'human';
+    agentId?: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false, error: 'sign in first' };
+    const s = this.settings();
+    if (!s.workspaceId) return { ok: false, error: 'no workspace' };
+    const body = typeof input?.body === 'string' ? input.body.trim() : '';
+    if (!body) return { ok: false, error: 'body required' };
+    const board = input.board === 'agent' ? 'agent' : 'human';
+    const authorKind = input.authorKind === 'agent' ? 'agent' : 'human';
+    const row: Record<string, unknown> = {
+      workspace_id: s.workspaceId,
+      entry_id: randomUUID(),
+      board,
+      author_kind: authorKind,
+      author_label: this.auth.email ?? null,
+      author_machine: this.machineId(),
+      agent_id: authorKind === 'agent'
+        ? (typeof input.agentId === 'string' && input.agentId ? input.agentId : 'orchestrator')
+        : null,
+      body,
+      updated_at: Date.now()
+    };
+    try {
+      return await insertBoardEntry(this.client, row);
+    } catch (e) { const error = errMsg(e); this.lastError = error; return { ok: false, error }; }
+  }
+
+  /** Remove a board entry by its id (humans may delete agent entries too). */
+  async removeBoardEntry(id: string): Promise<{ ok: boolean }> {
+    if (!this.client || !this.auth.signedIn) return { ok: false };
+    const s = this.settings();
+    if (!s.workspaceId || !id) return { ok: false };
+    try {
+      return await deleteBoardEntry(this.client, s.workspaceId, id);
+    } catch (e) { this.lastError = errMsg(e); return { ok: false }; }
+  }
+
   /** Fetch a teammate's roster (read-only) by their machine id. */
   async teammateAgents(machineId: string): Promise<TeammateAgent[]> {
     if (!this.client || !this.auth.signedIn) return [];
@@ -544,6 +743,17 @@ export class SyncManager {
       if (stateCtx) {
         try {
           this.state.pushed += await pushState(stateCtx);
+        } catch (e) { this.lastError = errMsg(e); }
+      }
+
+      // TEAM PULSE — upsert this machine's member_notes row from <hive>/pulse.md.
+      // Per-owner (onConflict workspace_id,machine_id), owner_label = the signed-in
+      // email. When pulse.md is empty/missing, push a short derived fallback so a
+      // teammate never sees a blank pulse. Best-effort; rides the same beat.
+      if (this.deps.hive) {
+        try {
+          const body = this.pulseBody();
+          await pushMemberNote(this.client, s.workspaceId, machineId, this.auth.email ?? null, body);
         } catch (e) { this.lastError = errMsg(e); }
       }
 

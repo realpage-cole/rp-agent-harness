@@ -3,6 +3,7 @@ import { PixelButton } from '@/components/PixelButton';
 import { AgentRoster } from './AgentRoster';
 import { ActivityFeed } from './ActivityFeed';
 import { TaskBoard } from './TaskBoard';
+import { NotepadBoard } from './NotepadBoard';
 import { NeedsYouBanner } from './NeedsYouBanner';
 import { HiveViewSelector } from './HiveViewSelector';
 
@@ -15,6 +16,8 @@ import { HiveViewSelector } from './HiveViewSelector';
  */
 export function DashboardView() {
   const requestCommandCenterTab = useStore((s) => s.requestCommandCenterTab);
+  const centerView = useStore((s) => s.centerView);
+  const setCenterView = useStore((s) => s.setCenterView);
 
   return (
     <div style={{
@@ -33,6 +36,27 @@ export function DashboardView() {
         {/* Unified view toggle — switches roster + kanban between your hive and a
             teammate's (read-only) together. */}
         <HiveViewSelector />
+        {/* Compact center-panel surface toggle: the kanban vs the shared Notepad. */}
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['kanban', 'notepad'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setCenterView(v)}
+              style={{
+                padding: '3px 10px 1px',
+                background: centerView === v ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)',
+                boxShadow: centerView === v
+                  ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                  : 'inset 0 0 0 1px var(--cth-ink-700)',
+                fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none',
+                textTransform: 'capitalize'
+              }}
+            >
+              {v === 'kanban' ? 'Kanban' : 'Notepad'}
+            </button>
+          ))}
+        </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('tasks')}>Tasks</PixelButton>
           <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('schedules')}>Schedules</PixelButton>
@@ -49,7 +73,7 @@ export function DashboardView() {
         gap: 12
       }}>
         <AgentRoster />
-        <TaskBoard />
+        {centerView === 'notepad' ? <NotepadBoard /> : <TaskBoard />}
         <ActivityFeed />
       </div>
     </div>
