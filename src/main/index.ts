@@ -20,6 +20,7 @@ import type { UsageProvider } from './usage';
 import { MemoryManager, type MemorySettings } from './memory';
 import { embed as ollamaEmbed } from './memory/ollama';
 import { MemoryReflector, type ReflectSettings } from './reflect';
+import { ThoughtsService } from './thoughts';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens } from './transcript';
 import { traceDetails } from './traceDetail';
@@ -170,9 +171,24 @@ const syncManager = new SyncManager(
     // additive) on realtime/catch-up pull. Both are best-effort inside hive.ts.
     hive: {
       readStateRows: () => hive.readStateRows(),
+      pulse: () => hive.pulse(),
       applyStateRows: (r) => hive.applyStateRows(r)
     }
   }
+);
+// Harness-driven author of the Notepad "agent" board: twice a day (11:00 + 15:00
+// America/Chicago) it digests the hive's recent work and appends 1-3 forward-
+// looking ideas via the SyncManager (board='agent', authorKind='agent',
+// agentId='orchestrator'). A no-op unless agentThoughtsEnabled AND sync is on +
+// signed in (the board is shared). Mirrors the reflector's timer-service shape.
+const thoughts = new ThoughtsService(
+  () => readConfig().harnessHome,
+  () => readConfig().defaultCommand ?? 'claude',
+  () => readConfig().agentThoughtsEnabled !== false,
+  () => syncManager.canRunMemory(),
+  (body) => syncManager.appendBoardEntry({
+    board: 'agent', body, authorKind: 'agent', agentId: 'orchestrator'
+  })
 );
 let mainWindow: BrowserWindow | null = null;
 
@@ -1208,6 +1224,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
+  try { thoughts.stop(); } catch (e) { console.error('[changeHome] thoughts.stop:', e); }
 
   if (mode === 'move' && oldHome) {
     try {
@@ -1286,6 +1303,10 @@ ipcMain.handle('git:aheadBehind', (_evt, cwd: unknown) => {
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
 ipcMain.handle('hive:board', () => hive.board());
+ipcMain.handle('hive:setBoard', (_evt, body: unknown) => {
+  if (typeof body !== 'string') return { ok: false, error: 'invalid body' };
+  return hive.setBoard(body);
+});
 ipcMain.handle('hive:tasks', () => hive.tasks());
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
@@ -1393,6 +1414,7 @@ function teardownAndQuit(): void {
   try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[quit] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
+  try { thoughts.stop(); } catch (e) { console.error('[quit] thoughts.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
   app.quit();
@@ -1437,6 +1459,7 @@ ipcMain.handle('app:resetAll', () => {
   try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
+  try { thoughts.stop(); } catch (e) { console.error('[reset] thoughts.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
   // Erase the hive (the orchestrator's + every agent's memory, inboxes, tasks,
@@ -1728,6 +1751,67 @@ ipcMain.handle('sync:teammateAgents', (_evt, machineId: unknown) =>
 ipcMain.handle('sync:teammateTasks', (_evt, machineId: unknown) =>
   typeof machineId === 'string' ? syncManager.teammateTasks(machineId) : Promise.resolve({ tasks: [] }));
 
+// ─── IPC: Notepad shared surface (team pulse / agent library / pinned links) ─
+// TEAM PULSE — read every teammate's pulse; write THIS user's via the hive
+// (pulse.md), pushed to member_notes on the next beat. All read paths are
+// best-effort ([] / no-op when sync is off or signed out).
+ipcMain.handle('notepad:memberNotes', () => syncManager.listMemberNotes());
+ipcMain.handle('notepad:setMyPulse', (_evt, body: unknown) =>
+  hive.setPulse(typeof body === 'string' ? body : ''));
+// AGENT LIBRARY — the shared catalog of publishable agent definitions.
+ipcMain.handle('notepad:listSharedAgents', () => syncManager.listSharedAgents());
+ipcMain.handle('notepad:publishAgent', (_evt, input: unknown, why: unknown) => {
+  const i = (input ?? {}) as {
+    name?: unknown; role?: unknown; capabilities?: unknown;
+    model?: unknown; accent?: unknown; customPrompt?: unknown;
+  };
+  if (typeof i.name !== 'string' || !i.name.trim()) return { ok: false, error: 'name required' };
+  return syncManager.publishAgent(
+    {
+      name: i.name,
+      role: typeof i.role === 'string' ? i.role : undefined,
+      capabilities: Array.isArray(i.capabilities)
+        ? i.capabilities.filter((c): c is string => typeof c === 'string')
+        : undefined,
+      model: typeof i.model === 'string' ? i.model : undefined,
+      accent: typeof i.accent === 'string' ? i.accent : undefined,
+      customPrompt: typeof i.customPrompt === 'string' ? i.customPrompt : undefined
+    },
+    typeof why === 'string' ? why : ''
+  );
+});
+ipcMain.handle('notepad:unpublishAgent', (_evt, id: unknown) =>
+  typeof id === 'string' ? syncManager.unpublishAgent(id) : Promise.resolve({ ok: false }));
+// PINNED LINKS — the shared resources list.
+ipcMain.handle('notepad:listResources', () => syncManager.listResources());
+ipcMain.handle('notepad:addResource', (_evt, input: unknown) => {
+  const i = (input ?? {}) as { label?: unknown; url?: unknown; note?: unknown };
+  if (typeof i.label !== 'string' || typeof i.url !== 'string') return { ok: false };
+  return syncManager.addResource({
+    label: i.label,
+    url: i.url,
+    note: typeof i.note === 'string' ? i.note : undefined
+  });
+});
+ipcMain.handle('notepad:removeResource', (_evt, id: unknown) =>
+  typeof id === 'string' ? syncManager.removeResource(id) : Promise.resolve({ ok: false }));
+// NOTEPAD BOARDS — the agent board (authored by the THOUGHTS service) + the human
+// board (the add box). Reads return [] when sync is off/signed out; the add path
+// FORCES authorKind 'human' so a renderer can never spoof an agent entry.
+ipcMain.handle('notepad:listBoardEntries', (_evt, board: unknown) =>
+  syncManager.listBoardEntries(board === 'agent' ? 'agent' : 'human'));
+ipcMain.handle('notepad:addBoardEntry', (_evt, input: unknown) => {
+  const i = (input ?? {}) as { board?: unknown; body?: unknown };
+  if (typeof i.body !== 'string' || !i.body.trim()) return { ok: false, error: 'body required' };
+  return syncManager.appendBoardEntry({
+    board: i.board === 'agent' ? 'agent' : 'human',
+    body: i.body,
+    authorKind: 'human'
+  });
+});
+ipcMain.handle('notepad:removeBoardEntry', (_evt, id: unknown) =>
+  typeof id === 'string' ? syncManager.removeBoardEntry(id) : Promise.resolve({ ok: false }));
+
 // ─── IPC: Generic webhook + status API ──────────────────────────────────────
 ipcMain.handle('webhook:start', () => startWebhookServer());
 ipcMain.handle('webhook:stop', () => { stopWebhookServer(); return { ok: true }; });
@@ -1775,6 +1859,7 @@ function bootstrapHiveServices(): void {
   });
   memory.start(); // warm the Ollama reachability probe (embedding rides the sync beat)
   reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
+  thoughts.start(); // twice-daily agent-board ideas (no-op until sync on + signed in)
 
   // Always-on beats (decoupled from the optional heartbeat): the live fleet
   // snapshot the orchestrator reads (~8s) + the breaker/cost-ledger beat (~30s). Guarded so

@@ -283,6 +283,14 @@ export class HiveManager {
     if (!existsSync(board)) {
       writeFileSync(board, '# Hive board\n\n_Shared plans live here. The god agent is the scribe._\n', 'utf8');
     }
+    // The "team pulse" snippet teammates see in the Notepad. The god/orchestrator
+    // keeps it current each standup (1-3 lines on its user + the team's recent
+    // activity); the sync beat pushes it to member_notes. Seeded with a placeholder
+    // so a teammate never sees a blank pulse before the first standup.
+    const pulse = join(root, 'pulse.md');
+    if (!existsSync(pulse)) {
+      writeFileSync(pulse, '_No pulse yet — the orchestrator updates this each standup._\n', 'utf8');
+    }
     const tasks = join(root, 'tasks.json');
     if (!existsSync(tasks)) this.writeJson(tasks, { tasks: [] });
     const log = join(root, 'log.jsonl');
@@ -580,7 +588,7 @@ export class HiveManager {
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short. CAPABILITY CHECK FIRST — before you decompose or delegate any task, assess whether your CURRENT roster (the active, non-archived agents in registry.json/fleet.json) actually covers the skills AND capacity the task needs. If there is a gap, do NOT silently push the work onto an ill-suited agent or take it on yourself: STOP and recommend to the human exactly which agent(s) to spin up — name them by preset id (architect, backend, frontend, data-ml, infra-devops, rp-integrations, reviewer, qa-verify, researcher) or describe a custom one, say what each is for and why the current roster cannot cover it, and tell them to spawn it from the Add Agent dashboard (presets are one click). Only proceed once the gap is filled or the human explicitly says to continue with the agents on hand. Re-run this check whenever the task scope grows.'
-        + ` MONITOR the team by reading ${root}/fleet.json (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${root}/registry.json — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${root}/COMMANDS.md (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the dashboard's Needs-you queue; the human's answer lands in the same entry ("a") AND arrives as an inbox message to you — read it, act on it, and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+        + ` MONITOR the team by reading ${root}/fleet.json (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${root}/registry.json — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${root}/COMMANDS.md (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the dashboard's Needs-you queue; the human's answer lands in the same entry ("a") AND arrives as an inbox message to you — read it, act on it, and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. TEAM PULSE — each standup, keep ${root}/pulse.md updated with a 1-3 line status of your user plus the team's recent activity; this is the snippet teammates see as your "Team pulse" in the shared Notepad, so keep it current and human-readable. Steward the token budget.`
       : meta.isAssistant
       ? 'You are the orchestrator\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in the orchestrator\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that the orchestrator can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to the orchestrator.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
@@ -889,6 +897,67 @@ export class HiveManager {
   board(): string {
     const root = this.root();
     return root && existsSync(join(root, 'board.md')) ? readFileSync(join(root, 'board.md'), 'utf8') : '';
+  }
+
+  /**
+   * Overwrite the shared blackboard from the dashboard (the Notepad's Scratchpad).
+   * Writes board.md atomically, then bumps the LAST-WRITER-WINS stamps in registry
+   * meta (boardUpdatedAt + boardHash) so the next sync beat detects the change and
+   * pushes it (readStateRows reads these stamps). Commits via the single-committer
+   * path. Best-effort — returns {ok:false} when the hive is disabled or a write
+   * fails, so the IPC layer never throws.
+   */
+  setBoard(body: string): { ok: boolean; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
+    try {
+      this.ensureHive();
+      const path = join(root, 'board.md');
+      // board.md is raw markdown — write atomically via tmp+rename (atomicWriteJson
+      // is JSON-only) so a reader never sees a torn file.
+      const tmp = `${path}.tmp-${shortRand()}`;
+      writeFileSync(tmp, body, 'utf8');
+      renameSync(tmp, path);
+      // Bump the LWW stamps so the next push beat sees a changed board.
+      const reg = this.registry();
+      const hash = createHash('sha1').update(body).digest('hex');
+      reg.meta = { ...(reg.meta ?? {}), boardUpdatedAt: Date.now(), boardHash: hash };
+      this.atomicWriteJson(join(root, 'registry.json'), reg);
+      this.appendLog({ kind: 'board', bytes: body.length });
+      this.commit('hive: board (dashboard)');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** The orchestrator's "team pulse" snippet (<hive>/pulse.md), the short status
+   *  pushed to member_notes each beat so teammates see what this user is up to.
+   *  '' when the hive is disabled or the file is missing. */
+  pulse(): string {
+    const root = this.root();
+    return root && existsSync(join(root, 'pulse.md')) ? readFileSync(join(root, 'pulse.md'), 'utf8') : '';
+  }
+
+  /** Overwrite pulse.md from the dashboard (the Notepad's Team Pulse editor).
+   *  Atomic tmp+rename so a reader never sees a torn file; committed via the
+   *  single-committer path. The next sync beat pushes the new body to
+   *  member_notes. Best-effort — never throws into the IPC layer. */
+  setPulse(body: string): { ok: boolean; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
+    try {
+      this.ensureHive();
+      const path = join(root, 'pulse.md');
+      const tmp = `${path}.tmp-${shortRand()}`;
+      writeFileSync(tmp, body, 'utf8');
+      renameSync(tmp, path);
+      this.appendLog({ kind: 'pulse', bytes: body.length });
+      this.commit('hive: pulse');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
   }
   tasks(): unknown {
     const root = this.root();
@@ -1272,6 +1341,8 @@ function renderCommandsMd(): string {
     '- **cli** commands run in your shell (Bash) and can target the fleet, spawn, or query.',
     '',
     'To MONITOR the other agents in this hive, read `fleet.json` in the hive root (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) plus `registry.json` — `claude agents` does NOT list your hive siblings. Use `claude -p "..." --output-format json` for a one-off headless query.',
+    '',
+    'TEAM PULSE: each standup, keep `pulse.md` in the hive root updated with a 1-3 line status of your user plus the team\'s recent activity — it is the snippet teammates see as your "Team pulse" in the shared Notepad.',
     ''
   ];
   for (const g of COMMAND_GROUPS) {

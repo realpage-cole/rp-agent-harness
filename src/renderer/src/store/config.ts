@@ -75,6 +75,8 @@ export interface HarnessConfig {
   agentTokenCaps?: Record<string, number>;
   maxTurns?: number;
   circuitBreaker?: CircuitBreakerConfig;
+  /** Master toggle for the harness-driven Notepad "agent" board author (default on). */
+  agentThoughtsEnabled?: boolean;
 }
 
 /** The Sonnet model with the 1M-token context window — used for the orchestrator's

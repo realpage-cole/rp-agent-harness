@@ -23,6 +23,12 @@ export interface AgentCardProps {
    *  sticky note stuck to the card. Clicking it opens the first task's detail. */
   doingCount?: number;
   onTaskNoteClick?: () => void;
+  /** When set, render a "Publish ↑" button that publishes this LOCAL agent's
+   *  identity to the shared Agent Library. Omitted for teammate/read-only cards. */
+  onPublish?: () => void;
+  /** Transient publish feedback for THIS card, driven by AgentStrip:
+   *  'busy' while publishing, 'ok' (green) briefly on success. */
+  publishState?: 'idle' | 'busy' | 'ok';
 }
 
 const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
@@ -30,7 +36,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 export function AgentCard({
   name, accent, status, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick,
-  doingCount = 0, onTaskNoteClick
+  doingCount = 0, onTaskNoteClick, onPublish, publishState = 'idle'
 }: AgentCardProps) {
   // The god is always framed (stands out from the row); others only when selected.
   const framed = isGod || selected;
@@ -73,10 +79,11 @@ export function AgentCard({
       >
         <div style={{ display: 'flex', gap: 8, height: '100%' }}>
           <div style={{
-            width: 44,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            gap: 4, flexShrink: 0
           }}>
+            {/* Status sits ABOVE the avatar circle (bottom agent list only). */}
+            <PixelBadge status={status} />
             <Avatar name={name} accent={accent} size={40} />
           </div>
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
@@ -90,8 +97,37 @@ export function AgentCard({
                 overflow: 'hidden',
                 textOverflow: 'ellipsis'
               }}>{name.toUpperCase()}</span>
-              <PixelBadge status={status} />
             </div>
+
+            {/* Publish lives on its own row UNDER the name so it's easy to hit and
+                doesn't crowd the name/badge line. */}
+            {onPublish && (
+              <div style={{ display: 'flex' }}>
+                <span
+                  role="button"
+                  title="Publish this agent to the shared library"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (publishState !== 'busy') onPublish();
+                  }}
+                  style={{
+                    alignSelf: 'flex-start',
+                    fontFamily: 'var(--cth-font-display)', fontSize: 10, lineHeight: '14px',
+                    cursor: publishState === 'busy' ? 'default' : 'pointer',
+                    padding: '2px 8px 1px', whiteSpace: 'nowrap',
+                    transition: 'background 120ms, color 120ms, box-shadow 120ms',
+                    // Green highlight on success; neutral chip otherwise.
+                    color: publishState === 'ok' ? 'var(--cth-ink-900)' : 'var(--cth-ink-700)',
+                    background: publishState === 'ok' ? 'var(--cth-mint)' : 'transparent',
+                    boxShadow: publishState === 'ok'
+                      ? 'inset 0 0 0 1px var(--cth-ink-900)'
+                      : 'inset 0 0 0 1px var(--cth-ink-300)'
+                  }}
+                >
+                  {publishState === 'ok' ? 'PUBLISHED ✓' : publishState === 'busy' ? 'PUBLISHING…' : 'PUBLISH ↑'}
+                </span>
+              </div>
+            )}
 
             <div style={{
               display: 'flex', alignItems: 'center', gap: 5,

@@ -329,6 +329,303 @@ export async function fetchTeammateAgents(
   }
 }
 
+// ─── Notepad shared surface (member_notes / shared_agents / resources) ───────
+//
+// TEAM PULSE is per-owner and pushed on the beat (pushMemberNote); the AGENT
+// LIBRARY + PINNED LINKS are written immediately by their IPC methods and read
+// live by the list helpers. All workspace-scoped + best-effort ([] / no-op on
+// error), mirroring the teammate-read path above.
+
+/** A teammate's "team pulse" snippet — one row per owner machine. */
+export interface MemberNoteRow {
+  machineId: string;
+  ownerLabel: string | null;
+  body: string;
+  updatedAt: number;
+  isMe: boolean;
+}
+
+/** A published agent definition from the shared catalog. */
+export interface SharedAgentRow {
+  id: string;
+  name: string;
+  role: string | null;
+  capabilities: string[];
+  model: string | null;
+  accent: string | null;
+  customPrompt: string | null;
+  why: string | null;
+  authorLabel: string | null;
+  createdAt: string | null;
+}
+
+/** A pinned link from the shared resources list. */
+export interface ResourceRow {
+  id: string;
+  label: string;
+  url: string;
+  note: string | null;
+  authorLabel: string | null;
+  createdAt: string | null;
+}
+
+/** Upsert THIS machine's member_notes row (the team pulse) from `body`. Per-owner
+ *  (onConflict workspace_id,machine_id), tagged with owner_label. Best-effort:
+ *  returns the number pushed (0 on no-op/error). */
+export async function pushMemberNote(
+  client: SupabaseLike,
+  workspaceId: string,
+  machineId: string,
+  ownerLabel: string | null,
+  body: string
+): Promise<number> {
+  const row = {
+    workspace_id: workspaceId,
+    machine_id: machineId,
+    owner_label: ownerLabel,
+    body,
+    updated_at: Date.now()
+  };
+  return (await upsert(client, 'member_notes', [row], 'workspace_id,machine_id')) ? 0 : 1;
+}
+
+/** List every teammate's pulse for this workspace. `isMe` flags this machine's
+ *  own row. Best-effort: []. */
+export async function listMemberNotes(
+  client: SupabaseLike,
+  workspaceId: string,
+  machineId: string
+): Promise<MemberNoteRow[]> {
+  try {
+    const { data, error } = await client
+      .from('member_notes')
+      .select('machine_id, owner_label, body, updated_at')
+      .eq('workspace_id', workspaceId);
+    if (error || !data) return [];
+    return data
+      .filter((r) => typeof r.machine_id === 'string')
+      .map((r) => ({
+        machineId: r.machine_id as string,
+        ownerLabel: typeof r.owner_label === 'string' ? r.owner_label : null,
+        body: typeof r.body === 'string' ? r.body : '',
+        updatedAt: typeof r.updated_at === 'number' ? r.updated_at : 0,
+        isMe: r.machine_id === machineId
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** List the shared agent catalog for this workspace, newest first. Best-effort: []. */
+export async function listSharedAgents(
+  client: SupabaseLike,
+  workspaceId: string
+): Promise<SharedAgentRow[]> {
+  try {
+    const { data, error } = await client
+      .from('shared_agents')
+      .select('identity_id, name, role, capabilities, model, accent, custom_prompt, why, author_label, created_at')
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false });
+    if (error || !data) return [];
+    return data
+      .filter((r) => typeof r.identity_id === 'string')
+      .map((r) => ({
+        id: r.identity_id as string,
+        name: typeof r.name === 'string' ? r.name : (r.identity_id as string),
+        role: typeof r.role === 'string' ? r.role : null,
+        capabilities: Array.isArray(r.capabilities)
+          ? r.capabilities.filter((c): c is string => typeof c === 'string')
+          : [],
+        model: typeof r.model === 'string' ? r.model : null,
+        accent: typeof r.accent === 'string' ? r.accent : null,
+        customPrompt: typeof r.custom_prompt === 'string' ? r.custom_prompt : null,
+        why: typeof r.why === 'string' ? r.why : null,
+        authorLabel: typeof r.author_label === 'string' ? r.author_label : null,
+        createdAt: typeof r.created_at === 'string' ? r.created_at : null
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Insert one shared-agent catalog row. Best-effort: returns ok + an optional
+ *  error string (surfaced to the publisher). */
+export async function insertSharedAgent(
+  client: SupabaseLike,
+  row: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await client.from('shared_agents').insert([row]);
+    return error ? { ok: false, error: error.message } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: errMsg(e) };
+  }
+}
+
+/** Delete one shared-agent catalog row by its identity_id. Best-effort: ok flag. */
+export async function deleteSharedAgent(
+  client: SupabaseLike,
+  workspaceId: string,
+  identityId: string
+): Promise<{ ok: boolean }> {
+  try {
+    const { error } = await client
+      .from('shared_agents')
+      .delete()
+      .eq('workspace_id', workspaceId)
+      .eq('identity_id', identityId);
+    return { ok: !error };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** List the shared pinned-links for this workspace, newest first. Best-effort: []. */
+export async function listResources(
+  client: SupabaseLike,
+  workspaceId: string
+): Promise<ResourceRow[]> {
+  try {
+    const { data, error } = await client
+      .from('resources')
+      .select('resource_id, label, url, note, author_label, created_at')
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false });
+    if (error || !data) return [];
+    return data
+      .filter((r) => typeof r.resource_id === 'string')
+      .map((r) => ({
+        id: r.resource_id as string,
+        label: typeof r.label === 'string' ? r.label : '',
+        url: typeof r.url === 'string' ? r.url : '',
+        note: typeof r.note === 'string' ? r.note : null,
+        authorLabel: typeof r.author_label === 'string' ? r.author_label : null,
+        createdAt: typeof r.created_at === 'string' ? r.created_at : null
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Insert one pinned-link row. Best-effort: ok flag. */
+export async function insertResource(
+  client: SupabaseLike,
+  row: Record<string, unknown>
+): Promise<{ ok: boolean }> {
+  try {
+    const { error } = await client.from('resources').insert([row]);
+    return { ok: !error };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Delete one pinned-link row by its resource_id. Best-effort: ok flag. */
+export async function deleteResource(
+  client: SupabaseLike,
+  workspaceId: string,
+  resourceId: string
+): Promise<{ ok: boolean }> {
+  try {
+    const { error } = await client
+      .from('resources')
+      .delete()
+      .eq('workspace_id', workspaceId)
+      .eq('resource_id', resourceId);
+    return { ok: !error };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// ─── Notepad board entries (agent + human boards) ────────────────────────────
+//
+// Two workspace-scoped boards backed by one table (board_entries):
+//   • board='agent'  — forward-looking ideas the harness THOUGHTS service appends.
+//   • board='human'  — short notes a teammate posts via the Human board's add box.
+// Both are read newest-first (order by created_at desc) and written immediately
+// (not on the beat). All workspace-scoped + best-effort, mirroring the
+// member_notes / resources helpers above.
+
+/** One attributed entry from a Notepad board (agent or human). */
+export interface BoardEntryRow {
+  id: string;
+  board: 'agent' | 'human';
+  body: string;
+  authorKind: 'agent' | 'human';
+  authorLabel: string | null;
+  agentId: string | null;
+  createdAt: string | null;
+  /** True when this machine authored the entry (author_machine === this machine). */
+  isMine: boolean;
+}
+
+/** List one board's entries for this workspace, newest first. `isMine` flags the
+ *  entries this machine authored. Best-effort: []. */
+export async function listBoardEntries(
+  client: SupabaseLike,
+  workspaceId: string,
+  board: 'agent' | 'human',
+  machineId: string
+): Promise<BoardEntryRow[]> {
+  try {
+    const { data, error } = await client
+      .from('board_entries')
+      .select('entry_id, board, body, author_kind, author_label, author_machine, agent_id, created_at')
+      .eq('workspace_id', workspaceId)
+      .eq('board', board)
+      .order('created_at', { ascending: false });
+    if (error || !data) return [];
+    return data
+      .filter((r) => typeof r.entry_id === 'string')
+      .map((r) => ({
+        id: r.entry_id as string,
+        board: r.board === 'agent' ? 'agent' : 'human',
+        body: typeof r.body === 'string' ? r.body : '',
+        authorKind: r.author_kind === 'agent' ? 'agent' : 'human',
+        authorLabel: typeof r.author_label === 'string' ? r.author_label : null,
+        agentId: typeof r.agent_id === 'string' ? r.agent_id : null,
+        createdAt: typeof r.created_at === 'string' ? r.created_at : null,
+        isMine: r.author_machine === machineId
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Insert one board entry. Best-effort: returns ok + an optional error string
+ *  (surfaced to the human add box). */
+export async function insertBoardEntry(
+  client: SupabaseLike,
+  row: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await client.from('board_entries').insert([row]);
+    return error ? { ok: false, error: error.message } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: errMsg(e) };
+  }
+}
+
+/** Delete one board entry by its entry_id. Best-effort: ok flag. */
+export async function deleteBoardEntry(
+  client: SupabaseLike,
+  workspaceId: string,
+  entryId: string
+): Promise<{ ok: boolean }> {
+  try {
+    const { error } = await client
+      .from('board_entries')
+      .delete()
+      .eq('workspace_id', workspaceId)
+      .eq('entry_id', entryId);
+    return { ok: !error };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /** Fetch a teammate's task cards (the full payloads) for READ-ONLY viewing.
  *  Returns the same `{ tasks: [...] }` shape as window.cth.hiveTasks(), so the
  *  renderer reuses its existing parser. Best-effort: any error yields no tasks. */

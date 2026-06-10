@@ -96,6 +96,22 @@ export interface QueuedMessage {
 
 export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces' | 'prompt' | 'config';
 
+/** Which surface the center panel shows: the task kanban or the shared Notepad
+ *  (team pulse / scratchpad / agent library / pinned links). */
+export type CenterView = 'kanban' | 'notepad';
+
+/** Prefill for the Add-Agent modal. Setting a non-null prefill in the store ALSO
+ *  opens the modal; it's cleared when the modal closes. Sourced from the Agent
+ *  Library's "Add to my hive" (a published SharedAgent → a local spawn). */
+export interface AddAgentPrefill {
+  name?: string;
+  role?: string;
+  model?: string;
+  accent?: string;
+  capabilities?: string[];
+  customPrompt?: string;
+}
+
 /** Lifecycle of the god agent (orchestrator) bootstrap on launch.
  *  'booting' until its PTY is confirmed live, then 'ready' (or 'failed' if the
  *  spawn errored). The empty-dashboard UI shows a loader while 'booting' so users
@@ -117,6 +133,13 @@ interface State {
   selectedId: string | null;
   feeds: Record<string, string[]>;
   addAgentOpen: boolean;
+  /** Center-panel surface toggle: the task kanban (default) or the Notepad. */
+  centerView: CenterView;
+  setCenterView: (v: CenterView) => void;
+  /** Pending prefill for the Add-Agent modal — non-null ALSO opens the modal
+   *  (consumed by the modal on mount, cleared when it closes). */
+  addAgentPrefill: AddAgentPrefill | null;
+  setAddAgentPrefill: (p: AddAgentPrefill | null) => void;
   fullscreenAgentId: string | null;
   fullscreenFilePath: string | null;
   sidebarWidth: number;
@@ -148,6 +171,10 @@ interface State {
    *  task link → 'tasks'). `seq` makes repeated identical requests distinct. */
   ccTabRequest: { tab: string; seq: number } | null;
   requestCommandCenterTab: (tab: string) => void;
+  /** Bumped after a successful agent Publish so the Notepad's Agent Library
+   *  reloads immediately instead of waiting for its ~15s poll. */
+  sharedAgentsNonce: number;
+  bumpSharedAgents: () => void;
   /** The hive currently being VIEWED in the dashboard: null = your own (local),
    *  else a teammate's {machineId, ownerLabel}. ONE shared selection drives the
    *  roster + kanban together (read-only for a teammate). Ephemeral — not persisted. */
@@ -363,9 +390,18 @@ export const useStore = create<State>((set) => ({
   selectedId: initialSelectedId,
   feeds: {},
   addAgentOpen: false,
+  centerView: 'kanban',
+  setCenterView: (v) => set({ centerView: v }),
+  // Setting a non-null prefill opens the modal; clearing it leaves the modal
+  // state to its own setAddAgentOpen toggle (cleared when the modal closes).
+  addAgentPrefill: null,
+  setAddAgentPrefill: (p) =>
+    set(p ? { addAgentPrefill: p, addAgentOpen: true } : { addAgentPrefill: null }),
   ccTabRequest: null,
   requestCommandCenterTab: (tab) =>
     set((s) => ({ ccTabRequest: { tab, seq: (s.ccTabRequest?.seq ?? 0) + 1 } })),
+  sharedAgentsNonce: 0,
+  bumpSharedAgents: () => set((s) => ({ sharedAgentsNonce: s.sharedAgentsNonce + 1 })),
   viewedOwner: null,
   setViewedOwner: (owner) => set({ viewedOwner: owner }),
   fullscreenAgentId: null,

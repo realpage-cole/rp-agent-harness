@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AgentCard } from './AgentCard';
 import { PixelButton } from './PixelButton';
+import { PixelPanel } from './PixelPanel';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
 import { buildSpawnCommand, inferAgentProvider, tokenizeCommand, type HarnessConfig } from '@/store/config';
@@ -18,7 +19,14 @@ export function AgentStrip({ config }: AgentStripProps) {
   const select = useStore(s => s.select);
   const setAddAgentOpen = useStore(s => s.setAddAgentOpen);
   const openTaskDetail = useStore(s => s.openTaskDetail);
+  const bumpSharedAgents = useStore(s => s.bumpSharedAgents);
   const [restoring, setRestoring] = useState(false);
+  // Transient per-agent publish feedback for the card button ('busy' → 'ok').
+  const [pubState, setPubState] = useState<Record<string, 'busy' | 'ok'>>({});
+  // The agent being published, if any (drives the in-app publish dialog —
+  // Electron renderers don't support window.prompt, so we collect "why" here).
+  const [publishTarget, setPublishTarget] = useState<Agent | null>(null);
+  const [publishWhy, setPublishWhy] = useState('');
   // Each worker's actively-DOING ledger tasks, polled from hive/tasks.json —
   // rendered as a sticky note on the avatar card (click → task detail).
   const [doingByAgent, setDoingByAgent] = useState<Record<string, string[]>>({});
@@ -41,6 +49,57 @@ export function AgentStrip({ config }: AgentStripProps) {
     const iv = setInterval(() => { void poll(); }, 5000);
     return () => { cancelled = true; clearInterval(iv); };
   }, []);
+
+  /** Open the in-app publish dialog for a LOCAL agent (window.prompt is a no-op
+   *  in Electron, so we collect the "why" with a real dialog). */
+  const openPublish = (agent: Agent): void => {
+    setPublishWhy('');
+    setPublishTarget(agent);
+  };
+
+  /** Confirm publish from the dialog: gather the agent's identity + operator
+   *  prompt addendum and call window.cth.publishAgent with the typed "why". */
+  const confirmPublish = async () => {
+    const agent = publishTarget;
+    if (!agent) return;
+    const why = publishWhy.trim();
+    setPublishTarget(null);
+    let customPrompt = '';
+    try {
+      const info = await window.cth.getAgentPrompt(agent.id);
+      customPrompt = info?.custom ?? '';
+    } catch { /* best-effort — publish without the addendum */ }
+    const meta = (await window.cth.hiveRegistry().catch(() => null))?.agents?.[agent.id];
+    setPubState((s) => ({ ...s, [agent.id]: 'busy' }));
+    let res: { ok: boolean; error?: string };
+    try {
+      res = await window.cth.publishAgent({
+        name: agent.name,
+        role: agent.description || undefined,
+        model: agent.model,
+        accent: agent.accent,
+        capabilities: meta?.capabilities,
+        customPrompt: customPrompt || undefined
+      }, why);
+    } catch (e) {
+      res = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (res.ok) {
+      // Green "Published ✓" for ~1.8s, and refresh the library now (don't wait
+      // for its ~15s poll).
+      setPubState((s) => ({ ...s, [agent.id]: 'ok' }));
+      bumpSharedAgents();
+      setTimeout(() => setPubState((s) => { const n = { ...s }; delete n[agent.id]; return n; }), 1800);
+    } else {
+      setPubState((s) => { const n = { ...s }; delete n[agent.id]; return n; });
+      // The publish + library are Supabase-synced — make the sign-in case clear.
+      const err = res.error ?? 'unknown error';
+      const msg = /sign in|workspace/i.test(err)
+        ? 'Turn on team sync and sign in (Settings → Sync), and set a workspace, to publish to the shared library.'
+        : `Publish failed: ${err}`;
+      window.alert(msg);
+    }
+  };
 
   /** Respawn every worker from the previous session with its ORIGINAL agent id,
    *  cwd, model and command — the hive workspace (memory.md, inbox, registry
@@ -99,6 +158,7 @@ export function AgentStrip({ config }: AgentStripProps) {
   };
 
   return (
+    <>
     <div style={{
       display: 'flex',
       gap: 12,
@@ -130,6 +190,8 @@ export function AgentStrip({ config }: AgentStripProps) {
             const first = doingByAgent[a.id]?.[0];
             if (first) openTaskDetail(first);
           }}
+          onPublish={() => openPublish(a)}
+          publishState={pubState[a.id] ?? 'idle'}
         />
       ))}
       {restorableAgents.length > 0 && (
@@ -160,5 +222,48 @@ export function AgentStrip({ config }: AgentStripProps) {
         </span>
       </PixelButton>
     </div>
+
+    {publishTarget && (
+      <div
+        onClick={() => setPublishTarget(null)}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 60,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.4)'
+        }}
+      >
+        <div onClick={(e) => e.stopPropagation()} style={{ width: 420, maxWidth: '90vw' }}>
+          <PixelPanel variant="dialog" title="PUBLISH AGENT" noPadding>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 14 }}>
+              <div style={{ fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.5 }}>
+                Publish <b>{publishTarget.name}</b> to the shared agent library so teammates can add it to their hive.
+              </div>
+              <label style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+                What makes this agent worth sharing? (optional)
+              </label>
+              <textarea
+                value={publishWhy}
+                onChange={(e) => setPublishWhy(e.target.value)}
+                autoFocus
+                rows={3}
+                placeholder="e.g. tuned for RealPage TFS + Salesforce SR workflows"
+                style={{
+                  resize: 'vertical', padding: '6px 8px',
+                  background: 'var(--cth-paper-100)', border: 'none',
+                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                  color: 'var(--cth-ink-900)', outline: 'none'
+                }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <PixelButton variant="ghost" size="sm" onClick={() => setPublishTarget(null)}>Cancel</PixelButton>
+                <PixelButton variant="primary" size="sm" onClick={() => { void confirmPublish(); }}>Publish ↑</PixelButton>
+              </div>
+            </div>
+          </PixelPanel>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

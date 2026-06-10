@@ -196,6 +196,12 @@ export interface HarnessConfig {
   /** Never condense a file smaller than this; also the section-trigger byte floor.
    *  DECIDED: 16 KB. */
   reflectMinBytes?: number;
+
+  // ─── Agent Thoughts (the Notepad agent board author) ───────────────────────
+  /** Master toggle for the in-process ThoughtsService — the harness-driven author
+   *  of the Notepad "agent" board (twice-daily forward-looking ideas grounded in
+   *  recent hive work). Default on; a no-op until sync is on + signed in. */
+  agentThoughtsEnabled?: boolean;
 }
 
 const DEFAULTS: HarnessConfig = {
@@ -227,7 +233,9 @@ const DEFAULTS: HarnessConfig = {
   reflectByteTriggerPct: 50,
   reflectSectionTrigger: 50,
   reflectRecentKeep: 12,
-  reflectMinBytes: 16_384
+  reflectMinBytes: 16_384,
+  // Agent Thoughts — on by default; harmless until sync is on + signed in.
+  agentThoughtsEnabled: true
 };
 
 function configPath(): string {

@@ -107,6 +107,9 @@ export interface SupabaseTable {
     rows: unknown[],
     opts?: { onConflict?: string; ignoreDuplicates?: boolean }
   ): Promise<{ error: { message: string } | null }>;
+  /** Begin an INSERT. Awaitable to `{ error }` (the Notepad write paths don't read
+   *  back the inserted rows). Used by publishAgent/addResource. */
+  insert(rows: unknown[]): Promise<{ error: { message: string } | null }>;
   select(cols?: string): SupabaseSelect;
   /** Begin a DELETE; the returned builder is filtered with eq() then awaited.
    *  Used to clear an agent's stale memory_chunks before re-inserting. */
@@ -192,6 +195,10 @@ export interface StateRows {
  */
 export interface HiveBridge {
   readStateRows(): StateRows;
+  /** The orchestrator's "team pulse" snippet (<hive>/pulse.md), pushed to
+   *  member_notes each beat so teammates see what this user is up to. '' when
+   *  empty/missing — the push then derives a short fallback line. */
+  pulse(): string;
   applyStateRows(remote: {
     agents?: Record<string, unknown>[];
     tasks?: Record<string, unknown>[];
