@@ -183,7 +183,7 @@ function shortRand(): string {
  *  cursor, raw inbox/outbox JSON) — bulky/noisy churn that shouldn't be committed.
  *  Dropped as a per-agent .gitignore on birth here. (Only memory.md is embedded
  *  into the shared semantic memory, so the index never sees these either.) */
-const MINE_IGNORE_LINES = ['settings.json', 'cursor.json', 'inbox/', 'outbox/'];
+const MINE_IGNORE_LINES = ['settings.json', 'cursor.json', 'inbox/', 'outbox/', '.cchome/'];
 
 /** Idempotently ensure `<agentDir>/.gitignore` excludes the non-memory files.
  *  Append-only: writes only the missing lines, leaving any existing entries. */
@@ -428,6 +428,34 @@ export class HiveManager {
     }
     const args: string[] = [];
     if (!claudeProvider) return { args, env };
+
+    // RES-4 — FULL per-agent tool isolation: each WORKER gets its own Claude config
+    // home so it only sees the MCP servers + plugins provisioned into it
+    // (hive/agent-tooling.json + hive/bin/provision_agent_tools.py). god is the
+    // orchestrator and intentionally keeps the shared home (full access).
+    if (!meta.isGod) {
+      const cchome = join(dir, '.cchome');
+      mkdirSync(cchome, { recursive: true });
+      env.CLAUDE_CONFIG_DIR = cchome;
+      // CLAUDE_CONFIG_DIR bypasses the macOS keychain, so carry auth via a
+      // long-lived token (`claude setup-token`), kept out of git.
+      try {
+        const tokFile = join(root, '.secrets', 'cc-oauth-token');
+        if (existsSync(tokFile)) {
+          const tok = readFileSync(tokFile, 'utf8').trim();
+          if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
+        }
+      } catch { /* best-effort: fall back to the home's own auth */ }
+      // Seed onboarding + workspace trust once so a fresh isolated home never prompts.
+      const cfgJson = join(cchome, '.claude.json');
+      if (!existsSync(cfgJson)) {
+        this.writeJson(cfgJson, {
+          hasCompletedOnboarding: true,
+          projects: { [root]: { hasTrustDialogAccepted: true } },
+          mcpServers: {}
+        });
+      }
+    }
 
     args.push('--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false));
 
