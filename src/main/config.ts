@@ -418,6 +418,17 @@ export function teamMissions(id: string, cfg: HarnessConfig = readConfig()): Sch
   return getTeam(id, cfg)?.missions ?? cfg.missions ?? [];
 }
 
+/** Persist a team's mission list to the right place: the GLOBAL config.missions
+ *  for the default team (byte-identical to the legacy path), or that team's own
+ *  TeamConfig.missions for a clone. Serialized via mutateConfig (§7.9). */
+export function setTeamMissions(id: string, missions: ScheduledMission[]): void {
+  if (id === DEFAULT_TEAM_ID) { writeConfig({ missions }); return; }
+  mutateConfig((c) => {
+    const t = (c.teams ?? []).find((x) => x.id === id);
+    if (t) t.missions = missions;
+  });
+}
+
 /** Per-team Supabase workspace id with global fallback. */
 export function teamSyncWorkspaceId(id: string, cfg: HarnessConfig = readConfig()): string {
   return getTeam(id, cfg)?.syncWorkspaceId ?? cfg.syncWorkspaceId ?? '';

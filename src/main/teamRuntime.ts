@@ -1,7 +1,7 @@
 import { Notification } from 'electron';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { HiveManager } from './hive';
+import { HiveManager, type HiveMessage } from './hive';
 import { HookServer } from './hooks';
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import { TelemetryCollector } from './telemetry';
@@ -14,7 +14,7 @@ import type { MemorySettings } from './memory';
 import type { PtyManager } from './pty';
 import type { PersistStore } from './db';
 import {
-  readConfig, writeConfig, mutateConfig,
+  readConfig, setTeamMissions,
   teamHome, teamMissions, teamSyncWorkspaceId, teamCostCapTokens, teamAgentTokenCaps,
   ensureDefaultMissions, DEFAULT_TEAM_ID,
   type ScheduledMission
@@ -23,20 +23,31 @@ import {
 /** Globals the runtime borrows but does NOT own — there is exactly one of each
  *  across the whole app, shared by every team. (The PTY manager, the PTY→agent
  *  map, the SQLite store, the renderer window, the global Ollama memory env.) */
+/** Owner of a live PTY: which team it belongs to and which agent it runs (BE-6).
+ *  Keyed by the globally-unique PTY id, so a closed tab / breaker-stop archives
+ *  on the correct team's hive. */
+export interface PtyOwner {
+  teamId: string;
+  agentId: string;
+}
+
 export interface TeamRuntimeDeps {
   /** The live renderer webContents, or null while the window is gone. */
   liveWebContents: () => Electron.WebContents | null;
   /** The single PTY manager (one per app — terminals are global). */
   ptyManager: PtyManager;
-  /** Global PTY id → agent id map. (Phase 2/BE-6 widens the value to carry a
-   *  teamId; for now teardown of a breaker-stopped PTY routes through deps.) */
-  ptyToAgent: Map<string, string>;
+  /** Global PTY id → {teamId, agentId}. Shared across teams; ptyForAgent filters
+   *  to this team's entries. */
+  ptyToAgent: Map<string, PtyOwner>;
   /** Archive + worktree-cleanup for a PTY id (lives in index.ts; global). */
   teardownPty: (ptyId: string) => void;
   /** The shared SQLite store (window bounds + command history). */
   persist: PersistStore;
   /** The global semantic-memory env (Ollama host/model), injected at memory push. */
   memoryEnv: () => Record<string, string>;
+  /** Forward every routed hive message to the closing-time coordinator, tagged
+   *  with this team's id, so it can collect ACKs per team (BE-8). Optional. */
+  onRouted?: (teamId: string, msg: HiveMessage, targets: string[]) => void;
 }
 
 /** A mission's live scheduler handles (initial setTimeout + steady setInterval). */
@@ -86,6 +97,17 @@ export class TeamRuntime {
   /** Always-on beats (independent of the optional heartbeat mission). */
   private fleetTimer: ReturnType<typeof setInterval> | null = null;
   private breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** True once start() has run (services live); false after stop(). Surfaced as
+   *  TeamSummary.running so the renderer can badge dormant vs live teams. */
+  private started = false;
+
+  /** Whether this team's services are currently running. */
+  isRunning(): boolean { return this.started; }
+
+  /** Count of non-archived agents in this team's roster (TeamSummary.agentCount). */
+  agentCount(): number {
+    return Object.values(this.hive.registry().agents).filter((a) => !a.archived).length;
+  }
 
   constructor(
     teamId: string,
@@ -101,14 +123,14 @@ export class TeamRuntime {
       return home ? teamHome(home, teamId) : null;
     };
 
-    // HiveManager — emit is wrapped to STAMP teamId on every payload sent to the
-    // renderer (§6 contract), so the renderer can demux concurrent team streams.
-    this.hive = new HiveManager(getHome, this.stampedEmit(), teamId);
+    // HiveManager — emit routes through this.emit so every payload carries teamId
+    // (§6.3), letting the renderer demux concurrent team streams.
+    this.hive = new HiveManager(getHome, (ch, p) => this.emit(ch, p), teamId);
 
     this.control = new ControlRegistry();
 
     this.telemetry = new TelemetryCollector({
-      emit: (channel, payload) => { try { this.deps.liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } },
+      emit: (ch, p) => this.emit(ch, p),
       resolveCwd: (agentId) => this.hive.registry().agents[agentId]?.cwd ?? null
     });
     this.usageProvider = this.telemetry;
@@ -130,7 +152,7 @@ export class TeamRuntime {
 
     this.hookServer = new HookServer(
       this.hive,
-      () => this.deps.liveWebContents(),
+      (ch, p) => this.emit(ch, p),
       () => readConfig(),
       this.control,
       this.breaker
@@ -185,22 +207,27 @@ export class TeamRuntime {
     );
   }
 
-  // ─── emit stamping (the §6 contract) ───────────────────────────────────────
+  // ─── emit stamping (the §6.3 contract) ─────────────────────────────────────
 
-  /** Wrap the raw renderer send so every HiveManager-emitted payload carries this
-   *  team's id. Object payloads gain a `teamId` field (additive — back-compat: an
-   *  unmigrated single-team renderer simply ignores it). Non-object payloads pass
-   *  through untouched (none are emitted today, but we never throw on a stamp). */
-  private stampedEmit(): (channel: string, payload: unknown) => boolean {
-    return (channel, payload) => {
-      const wc = this.deps.liveWebContents();
-      if (!wc) return false;
-      const stamped =
-        payload && typeof payload === 'object' && !Array.isArray(payload)
-          ? { ...(payload as Record<string, unknown>), teamId: this.teamId }
-          : payload;
-      try { wc.send(channel, stamped); return true; } catch { return false; }
-    };
+  /** The single renderer sink for THIS team. Every per-team push event routes
+   *  through here so it carries a `teamId` — the rule that lets the renderer demux
+   *  N concurrent team streams (§6.3). Object payloads gain a `teamId` field
+   *  (additive — back-compat: an unmigrated single-team renderer ignores it);
+   *  non-object payloads pass through untouched. Returns true iff delivered (the
+   *  HiveManager + HookServer's terminal-handoff path read the boolean). Wired
+   *  into: HiveManager emit, the HookServer (hookEvent/contextUpdate/
+   *  approvalRequest), the telemetry collector (telemetry:event), the breaker beat
+   *  (control:breakerState), and the mission scheduler (mission:autoCompact,
+   *  missions:updated). Supabase sync events stay raw — they're keyed by remote
+   *  workspace, orthogonal to local teams. */
+  emit(channel: string, payload: unknown): boolean {
+    const wc = this.deps.liveWebContents();
+    if (!wc) return false;
+    const stamped =
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), teamId: this.teamId }
+        : payload;
+    try { wc.send(channel, stamped); return true; } catch { return false; }
   }
 
   // ─── live settings (read fresh each tick) ──────────────────────────────────
@@ -235,7 +262,11 @@ export class TeamRuntime {
    *  index.ts, not here. */
   start(): void {
     if (!this.hive.enabled()) return;
+    this.started = true;
     this.hive.ensureHive();
+    // Route this team's messages to the closing-time coordinator (BE-8), so it
+    // collects CLOSING-TIME-ACK/COMPLETE per team. Set once per start().
+    this.hive.setRoutedObserver((msg, targets) => this.deps.onRouted?.(this.teamId, msg, targets));
     this.hive.startRouter();
     // The built-in ops-standup + heartbeat missions live on the GLOBAL config and
     // belong to the default team; clones seed their own at clone time.
@@ -265,6 +296,7 @@ export class TeamRuntime {
    *  must never abort a quit/reset/changeHome. Globals (memory/persist/slack/
    *  webhook/ptyManager) are stopped by index.ts. */
   stop(): void {
+    this.started = false;
     try { this.clearMissionTimers(); } catch (e) { console.error(`[stop:${this.teamId}] clearMissionTimers:`, e); }
     if (this.fleetTimer) { clearInterval(this.fleetTimer); this.fleetTimer = null; }
     if (this.breakerBeatTimer) { clearInterval(this.breakerBeatTimer); this.breakerBeatTimer = null; }
@@ -283,15 +315,10 @@ export class TeamRuntime {
     return teamMissions(this.teamId, readConfig());
   }
 
-  /** Persist a mutated mission list back to the right place: the global config for
-   *  the default team (byte-identical to the legacy path), or this team's own
-   *  TeamConfig.missions for a clone. Serialized via mutateConfig (§7.9). */
+  /** Persist a mutated mission list to the right place (default → global config;
+   *  clone → its own TeamConfig.missions). Shared with the missions:save IPC. */
   private persistMissions(next: ScheduledMission[]): void {
-    if (this.isDefault) { writeConfig({ missions: next }); return; }
-    mutateConfig((c) => {
-      const t = (c.teams ?? []).find((x) => x.id === this.teamId);
-      if (t) t.missions = next;
-    });
+    setTeamMissions(this.teamId, next);
   }
 
   /** Clear + forget every armed mission timer (both setTimeout + setInterval). */
@@ -317,12 +344,10 @@ export class TeamRuntime {
           }
           // Auto-compact: hand to the renderer, which queues a /compact per agent
           // and delivers it when that agent goes idle (never mid-step).
-          if (m.autoCompact) {
-            try { this.deps.liveWebContents()?.send('mission:autoCompact'); } catch { /* window gone */ }
-          }
+          if (m.autoCompact) this.emit('mission:autoCompact', {});
           const next = this.missions().map((x) => (x.id === m.id ? { ...x, lastFiredAt: Date.now() } : x));
           this.persistMissions(next);
-          try { this.deps.liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
+          this.emit('missions:updated', {});
         } catch (e) {
           console.error(`[scheduler:${this.teamId}] mission`, m.id, e);
         }
@@ -354,7 +379,7 @@ export class TeamRuntime {
         }
         const cur = this.missions().map((x) => (x.id === m.id ? { ...x, lastFiredAt: Date.now() } : x));
         this.persistMissions(cur);
-        try { this.deps.liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
+        this.emit('missions:updated', {});
       } catch (e) {
         console.error(`[heartbeat:${this.teamId}]`, e);
       }
@@ -401,10 +426,12 @@ export class TeamRuntime {
     return Math.max(...times);
   }
 
-  /** PTY id owning a given agent id, or undefined. (Phase 1: ptyToAgent value is
-   *  the agent id; BE-6 widens it to carry a teamId so this filters by team.) */
+  /** PTY id owning a given agent id IN THIS TEAM, or undefined. Filters by teamId
+   *  so two teams that both have e.g. a `backend` never cross-match (BE-6). */
   private ptyForAgent(agentId: string): string | undefined {
-    for (const [ptyId, a] of this.deps.ptyToAgent) if (a === agentId) return ptyId;
+    for (const [ptyId, o] of this.deps.ptyToAgent) {
+      if (o.teamId === this.teamId && o.agentId === agentId) return ptyId;
+    }
     return undefined;
   }
 
@@ -475,7 +502,7 @@ export class TeamRuntime {
       inputs.push({ agentId: id, sample, progressing: now - this.lastCoordinationAt(id) < progressWindowMs });
     }
     for (const d of this.breaker.tick(inputs, now)) {
-      try { this.deps.liveWebContents()?.send('control:breakerState', d.state); } catch { /* window gone */ }
+      this.emit('control:breakerState', d.state);
       if (d.action === 'none') continue;
       const name = reg.agents[d.state.agentId]?.name ?? d.state.agentId;
       const reason = d.state.reason;

@@ -13,7 +13,7 @@
  */
 import { createServer, type Server } from 'node:net';
 import { existsSync, rmSync } from 'node:fs';
-import { Notification, type WebContents } from 'electron';
+import { Notification } from 'electron';
 import type { HiveManager } from './hive';
 import type { HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
@@ -47,7 +47,10 @@ export class HookServer {
 
   constructor(
     private hive: HiveManager,
-    private getWebContents: () => WebContents | null,
+    /** Push to the renderer. The owning TeamRuntime supplies a teamId-stamping
+     *  sink (§6.3), so every hookEvent/contextUpdate/approvalRequest carries the
+     *  team it belongs to without this server knowing about teams. */
+    private sendToRenderer: (channel: string, payload: unknown) => void,
     private getConfig: () => HarnessConfig,
     /** #7C — operator control state. Optional so tests can omit it. */
     private control?: ControlRegistry,
@@ -113,7 +116,7 @@ export class HookServer {
       const cw = p.context_window;
       if (agentId && cw && typeof cw.total_input_tokens === 'number'
         && typeof cw.context_window_size === 'number' && cw.context_window_size > 0) {
-        this.getWebContents()?.send('hive:contextUpdate', {
+        this.sendToRenderer('hive:contextUpdate', {
           agentId,
           tokens: cw.total_input_tokens,
           limit: cw.context_window_size
@@ -218,11 +221,11 @@ export class HookServer {
   /** Tell the renderer a tool call was gated/denied (#7C.1) so it can surface it
    *  (toast / control strip) — distinct from the avatar hook stream. */
   private emitControl(agentId: string, tool: string | undefined, reason: string | undefined): void {
-    this.getWebContents()?.send('control:approvalRequest', { agentId, tool, reason });
+    this.sendToRenderer('control:approvalRequest', { agentId, tool, reason });
   }
 
   private emit(agentId: string | undefined, event: string, p: HookPayload, blocked = false): void {
-    this.getWebContents()?.send('hive:hookEvent', {
+    this.sendToRenderer('hive:hookEvent', {
       agentId,
       event,
       tool: p.tool_name,

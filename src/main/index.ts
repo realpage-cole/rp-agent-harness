@@ -1,15 +1,18 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, screen, shell, Notification } from 'electron';
 import { spawn } from 'node:child_process';
-import { rmSync, existsSync, readFileSync, readdirSync, statSync, cpSync, writeFileSync, unlinkSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, readdirSync, statSync, cpSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
   readConfig, writeConfig, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForRole, ensureDefaultTeam, DEFAULT_TEAM_ID,
-  type HarnessConfig, type ScheduledMission
+  listTeams, getTeam, addTeam, teamHome, teamMissions, setTeamMissions,
+  OPS_STANDUP_MISSION, HEARTBEAT_MISSION,
+  type HarnessConfig, type ScheduledMission, type TeamConfig
 } from './config';
-import { TeamRuntime } from './teamRuntime';
+import { TeamRuntime, type TeamRuntimeDeps, type PtyOwner } from './teamRuntime';
+import type { TeamSummary, TeamEvent, CloneTeamResult } from '../shared/teams';
 import { listDir, readFileText, writeFileText } from './fs';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo,
@@ -28,7 +31,7 @@ import { costTotalsFromUsage } from './costTotals';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
 import { WebhookServer, type WebhookInbound, type WebhookTaskStatus } from './webhook';
-import { ClosingTimeController } from './closingTime';
+import { ClosingTimeController, type ClosingTimeEvent, type ClosingTimePhase } from './closingTime';
 import {
   inferAgentProvider,
   isClaudeProvider,
@@ -39,9 +42,10 @@ import {
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 const ptyManager = new PtyManager();
-/** Live PTY id → its hive agent id, recorded at spawn. The pty:kill handler only
- *  gets the PTY id, so this lets a closed tab archive the right registry agent. */
-const ptyToAgent = new Map<string, string>();
+/** Live PTY id → its owning {teamId, agentId}, recorded at spawn (BE-6). The
+ *  pty:kill handler only gets the PTY id, so this lets a closed tab archive the
+ *  right agent on the RIGHT team's hive. */
+const ptyToAgent = new Map<string, PtyOwner>();
 /** Live semantic-memory settings (Ollama host/model + master toggle), read fresh
  *  so a Settings change applies on the next embed/search without a restart. The
  *  global MemoryManager owns this; each TeamRuntime keeps its own copy for sync. */
@@ -76,27 +80,145 @@ const memory = new MemoryManager(memorySettings, {
 // scheduler + always-on fleet/breaker beats). Phase 1: exactly one — the legacy
 // 'default' team, whose home resolves to harnessHome (NO-MOVE; root stays
 // <harnessHome>/hive). Phase 2 (cloneTeam) adds more, live in parallel.
-defaultRuntime = new TeamRuntime(DEFAULT_TEAM_ID, {
+// Shared deps every TeamRuntime borrows (the GLOBAL singletons). Reused by the
+// default team here and by every cloned team in cloneTeam().
+const teamDeps: TeamRuntimeDeps = {
   liveWebContents,
   ptyManager,
   ptyToAgent,
   teardownPty,
   persist,
-  memoryEnv: () => memory.env()
-});
+  memoryEnv: () => memory.env(),
+  // Forward routed messages to the closing-time coordinator (BE-8), tagged with
+  // the team. No-op until a closing-time protocol is running for that team.
+  onRouted: (teamId, msg, targets) => closingControllers.get(teamId)?.onRouted(msg, targets)
+};
+defaultRuntime = new TeamRuntime(DEFAULT_TEAM_ID, teamDeps);
 const teams = new Map<string, TeamRuntime>([[DEFAULT_TEAM_ID, defaultRuntime]]);
 
-// Back-compat aliases: every IPC handler + helper below still addresses "the"
-// hive/breaker/control/telemetry/etc. These resolve to the DEFAULT team's
-// instances. (BE-7 threads an explicit teamId through the IPC surface; until
-// then the existing single-team callsites keep working unchanged.)
+// Back-compat aliases for the GLOBAL-surface handlers that legitimately target
+// the default team: the Slack/webhook ingestors + the shared-memory/teammate
+// sync surface (one workspace UI, default-team scoped), plus bootstrap/reset/
+// pulse. Per-team data handlers route through rt(teamId) instead, so they don't
+// alias. (BE-7.)
 const hive = defaultRuntime.hive;
-const control = defaultRuntime.control;
-const telemetry = defaultRuntime.telemetry;
-const breaker = defaultRuntime.breaker;
-const hookServer = defaultRuntime.hookServer;
-const reflector = defaultRuntime.reflector;
 const syncManager = defaultRuntime.syncManager;
+
+/** Resolve a (possibly absent/unknown) teamId to its runtime — defaulting to the
+ *  DEFAULT team for back-compat when omitted or unknown. Every per-team IPC
+ *  handler takes a trailing optional `teamId` and routes through this, so a
+ *  single-team renderer that passes nothing keeps hitting the default team. */
+function rt(teamId?: unknown): TeamRuntime {
+  return (typeof teamId === 'string' && teams.get(teamId)) || defaultRuntime;
+}
+
+/** Build the renderer-facing summary list for every registered team (teams:list).
+ *  Merges the persisted TeamConfig (id/name/createdAt/godId) with the live runtime
+ *  state (running/agentCount). A configured team without a runtime yet reads as
+ *  not-running / 0 agents. */
+function teamSummaries(): TeamSummary[] {
+  return listTeams().map((t) => {
+    const r = teams.get(t.id);
+    return {
+      id: t.id,
+      name: t.name,
+      createdAt: t.createdAt,
+      godId: t.godId,
+      running: r?.isRunning() ?? false,
+      agentCount: r?.agentCount() ?? 0
+    };
+  });
+}
+
+/** Push a teams:* lifecycle event to the renderer. NOT teamId-stamped the way
+ *  per-team data events are — it names the team in its payload (§6.1). */
+function emitTeamsEvent(ev: TeamEvent): void {
+  try { liveWebContents()?.send('teams:event', ev); } catch { /* window gone */ }
+}
+
+/** Slug for a team dir name: lowercase, non-alnum → '-', trimmed, capped. */
+function slugifyTeamName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'team';
+}
+
+/**
+ * Clone a team — CONFIGS-ONLY, fresh start (findings-MT-1 §5). Copies the source
+ * roster's per-agent config + the API key; resets all live state (fresh memory,
+ * empty board/tasks/inbox/outbox, fresh git); registers the team and brings it up
+ * LIVE in parallel immediately. The source's accumulated memory/history/cost is
+ * deliberately NOT copied. Returns the new team id.
+ */
+async function cloneTeam(sourceTeamId: string, newName: string): Promise<CloneTeamResult> {
+  const home = readConfig().harnessHome;
+  if (!home) return { ok: false, error: 'No harness home configured.' };
+  const source = teams.get(sourceTeamId) ?? defaultRuntime;
+  const srcReg = source.hive.registry();
+
+  // Allocate a stable, unique id (slug + short hex suffix). Guard against both a
+  // config collision and a stray on-disk dir.
+  let newId = `${slugifyTeamName(newName)}-${randomBytes(3).toString('hex')}`;
+  while (getTeam(newId) || existsSync(teamHome(home, newId))) {
+    newId = `${slugifyTeamName(newName)}-${randomBytes(3).toString('hex')}`;
+  }
+
+  try {
+    // Fresh runtime → its HiveManager is scoped to teams/<newId>. ensureHive lays
+    // down a clean hive skeleton (board/tasks/pulse/log/registry + git init +
+    // COMMANDS/PROTOCOL/gitignore/hook shim).
+    const runtime = new TeamRuntime(newId, teamDeps);
+    runtime.hive.ensureHive();
+
+    // Copy the API key so the clone runs without re-entering it.
+    try {
+      const srcKey = join(teamHome(home, sourceTeamId), 'hive', '.secrets', 'anthropic-api-key');
+      if (existsSync(srcKey)) {
+        const dstSecrets = join(teamHome(home, newId), 'hive', '.secrets');
+        mkdirSync(dstSecrets, { recursive: true });
+        cpSync(srcKey, join(dstSecrets, 'anthropic-api-key'));
+      }
+    } catch (e) { console.error('[clone] copy secret:', e); }
+
+    // Copy CONFIGS from the source roster only. Strip the live-state fields
+    // (status/lastSeen/archived/sessionId); ensureAgent re-stamps status idle /
+    // archived false, seeds a FRESH memory.md + cursor + empty inbox/outbox, and
+    // (for the god) sets godId. Accumulated memory is intentionally not carried.
+    for (const agent of Object.values(srcReg.agents)) {
+      const { status, lastSeen, archived, sessionId, ...meta } = agent;
+      runtime.hive.ensureAgent(meta);
+    }
+
+    // Register the team: a fresh per-team Supabase workspace id (used only once the
+    // user enables sync for this team) + the built-in missions seeded fresh.
+    const team: TeamConfig = {
+      id: newId,
+      name: newName,
+      createdAt: Date.now(),
+      godId: srcReg.godId ?? 'god',
+      syncWorkspaceId: randomBytes(8).toString('hex'),
+      missions: [
+        { ...OPS_STANDUP_MISSION, lastFiredAt: Date.now() },
+        { ...HEARTBEAT_MISSION, lastFiredAt: Date.now() }
+      ]
+    };
+    addTeam(team);
+
+    // Go live in parallel immediately, then tell the renderer to add + switch.
+    teams.set(newId, runtime);
+    runtime.start();
+    emitTeamsEvent({
+      kind: 'created',
+      teamId: newId,
+      summary: {
+        id: newId, name: newName, createdAt: team.createdAt, godId: team.godId,
+        running: runtime.isRunning(), agentCount: runtime.agentCount()
+      }
+    });
+    return { ok: true, teamId: newId };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 /** When true, skip the quit interceptor (user already confirmed). */
@@ -124,14 +246,16 @@ const worktreeOrigins = new Map<string, string>();
  * error can never crash the caller (an IPC handler or node-pty's onExit).
  */
 function teardownPty(id: string): void {
-  // 1) Archive the agent — retained + flagged; only live-PTY agents are active.
-  const agentId = ptyToAgent.get(id);
-  if (agentId) {
+  // 1) Archive the agent on ITS team's hive (BE-6) — retained + flagged; only
+  //    live-PTY agents are active.
+  const owner = ptyToAgent.get(id);
+  if (owner) {
     ptyToAgent.delete(id);
+    const r = rt(owner.teamId);
     // Drop breaker state so a dead agent can't leak/zombie a tripped level.
-    try { breaker.forget(agentId); } catch { /* best-effort */ }
-    if (hive.enabled()) {
-      try { hive.setArchived(agentId, true); } catch (e) { console.error('[hive] setArchived failed:', e); }
+    try { r.breaker.forget(owner.agentId); } catch { /* best-effort */ }
+    if (r.hive.enabled()) {
+      try { r.hive.setArchived(owner.agentId, true); } catch (e) { console.error('[hive] setArchived failed:', e); }
     }
   }
   // 2) Remove the isolated worktree, if any. Non-blocking; errors are logged.
@@ -602,10 +726,16 @@ function createWindow(): void {
 }
 
 // ─── IPC: pty lifecycle ─────────────────────────────────────────────────────
-ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; provider?: AgentProvider }) => {
+ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; provider?: AgentProvider; teamId?: string }) => {
   if (!opts || typeof opts.id !== 'string' || typeof opts.cwd !== 'string' || typeof opts.command !== 'string') {
     return { ok: false, error: 'invalid SpawnOptions' };
   }
+  // Route this spawn to its team's runtime (BE-6). Omitted/unknown teamId → the
+  // default team (back-compat). All hive provisioning + env injection + the
+  // ptyToAgent record below use THIS team's HiveManager, so HIVE_ROOT/HIVE_SOCK/
+  // OTEL/secrets are all team-correct.
+  const team = rt(opts.teamId);
+  const teamHive = team.hive;
   // Which CLI is this? Explicit wins; else inferred from the binary
   // (claude/codex/agy). Non-Claude providers skip every Claude-only spawn step
   // below. Persist the resolved provider onto opts (+ hive meta) so the registry
@@ -649,9 +779,9 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // If the agent carries hive metadata, provision its workspace and add
   // provider-specific spawn injection. Non-Claude providers get shared AGENT_*
   // env only; Claude Code also gets prompt/settings hook args.
-  if (opts.hive && hive.enabled()) {
+  if (opts.hive && teamHive.enabled()) {
     try {
-      const inj = hive.ensureAgent(
+      const inj = teamHive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
         { semanticMemory: memory.configured(), theme: readConfig().terminalTheme ?? 'light' }
       );
@@ -688,15 +818,16 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // prior id exists for this agent.
   if (opts.hive && opts.resume === true) {
     const rf = providerPreset(provider).resumeFlag;
-    const sid = hive.lastSession(opts.hive.id);
+    const sid = teamHive.lastSession(opts.hive.id);
     if (rf && sid) {
       const args = opts.args ?? [];
       if (!args.includes(rf)) { args.push(rf, sid); opts.args = args; }
     }
   }
-  // Remember which agent owns this PTY so closing the tab can archive it. A
-  // live terminal means active — ensureAgent above already cleared `archived`.
-  if (opts.hive?.id) ptyToAgent.set(opts.id, opts.hive.id);
+  // Remember which TEAM + agent owns this PTY so closing the tab archives it on
+  // the right team's hive (BE-6). A live terminal means active — ensureAgent
+  // above already cleared `archived`.
+  if (opts.hive?.id) ptyToAgent.set(opts.id, { teamId: team.teamId, agentId: opts.hive.id });
   // Pre-accept Claude Code's bypass-mode warning + folder-trust dialog so the
   // agent (spawned with --permission-mode bypassPermissions) doesn't stall on an
   // interactive prompt it can't answer and exit code 1. Best-effort, never blocks.
@@ -893,47 +1024,53 @@ ipcMain.handle('git:aheadBehind', (_evt, cwd: unknown) => {
 });
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
-ipcMain.handle('hive:registry', () => hive.registry());
-ipcMain.handle('hive:board', () => hive.board());
-ipcMain.handle('hive:setBoard', (_evt, body: unknown) => {
+// Every per-team query takes a trailing optional `teamId` (BE-7). Omitted/unknown
+// → the default team (back-compat), resolved via rt(). pty:write/resize/kill stay
+// PTY-id keyed (no teamId needed).
+ipcMain.handle('hive:registry', (_evt, teamId?: unknown) => rt(teamId).hive.registry());
+ipcMain.handle('hive:board', (_evt, teamId?: unknown) => rt(teamId).hive.board());
+ipcMain.handle('hive:setBoard', (_evt, body: unknown, teamId?: unknown) => {
   if (typeof body !== 'string') return { ok: false, error: 'invalid body' };
-  return hive.setBoard(body);
+  return rt(teamId).hive.setBoard(body);
 });
-ipcMain.handle('hive:tasks', () => hive.tasks());
-ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
-ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
-ipcMain.handle('hive:inbox', (_evt, id: unknown) => (typeof id === 'string' ? hive.inbox(id) : []));
-ipcMain.handle('hive:send', (_evt, partial: Partial<HiveMessage>, from: unknown) => {
-  if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  const msg = hive.send(partial ?? {}, typeof from === 'string' ? from : 'system');
+ipcMain.handle('hive:tasks', (_evt, teamId?: unknown) => rt(teamId).hive.tasks());
+ipcMain.handle('hive:log', (_evt, n: unknown, teamId?: unknown) => rt(teamId).hive.logTail(typeof n === 'number' ? n : 200));
+ipcMain.handle('hive:memory', (_evt, id: unknown, teamId?: unknown) => (typeof id === 'string' ? rt(teamId).hive.memory(id) : ''));
+ipcMain.handle('hive:inbox', (_evt, id: unknown, teamId?: unknown) => (typeof id === 'string' ? rt(teamId).hive.inbox(id) : []));
+ipcMain.handle('hive:send', (_evt, partial: Partial<HiveMessage>, from: unknown, teamId?: unknown) => {
+  const h = rt(teamId).hive;
+  if (!h.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
+  const msg = h.send(partial ?? {}, typeof from === 'string' ? from : 'system');
   return { ok: true, message: msg };
 });
-ipcMain.handle('hive:writeTasks', (_evt, tasks: unknown) => {
+ipcMain.handle('hive:writeTasks', (_evt, tasks: unknown, teamId?: unknown) => {
   if (!Array.isArray(tasks)) return { ok: false, error: 'invalid tasks' };
-  if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  hive.writeTasks(tasks as HiveTask[]);
+  const h = rt(teamId).hive;
+  if (!h.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
+  h.writeTasks(tasks as HiveTask[]);
   return { ok: true };
 });
-ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
+ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown, teamId?: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
-  if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  hive.setArchived(id, archived === true);
+  const h = rt(teamId).hive;
+  if (!h.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
+  h.setArchived(id, archived === true);
   return { ok: true };
 });
 
 // ─── IPC: per-agent operator prompt + editable metadata ──────────────────────
 // The dashboard shows the full composed system prompt (base, read-only) plus an
 // operator-editable addendum (custom) applied on the agent's next respawn.
-ipcMain.handle('hive:getAgentPrompt', (_evt, id: unknown) =>
-  typeof id === 'string' ? hive.getAgentPrompt(id) : { base: '', custom: '' });
-ipcMain.handle('hive:setAgentPrompt', (_evt, id: unknown, custom: unknown) => {
+ipcMain.handle('hive:getAgentPrompt', (_evt, id: unknown, teamId?: unknown) =>
+  typeof id === 'string' ? rt(teamId).hive.getAgentPrompt(id) : { base: '', custom: '' });
+ipcMain.handle('hive:setAgentPrompt', (_evt, id: unknown, custom: unknown, teamId?: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
-  return hive.setAgentPrompt(id, typeof custom === 'string' ? custom : '');
+  return rt(teamId).hive.setAgentPrompt(id, typeof custom === 'string' ? custom : '');
 });
-ipcMain.handle('hive:updateAgentMeta', (_evt, id: unknown, patch: unknown) => {
+ipcMain.handle('hive:updateAgentMeta', (_evt, id: unknown, patch: unknown, teamId?: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
   const p = (patch ?? {}) as { name?: unknown; role?: unknown; capabilities?: unknown };
-  return hive.updateAgentMeta(id, {
+  return rt(teamId).hive.updateAgentMeta(id, {
     name: typeof p.name === 'string' ? p.name : undefined,
     role: typeof p.role === 'string' ? p.role : undefined,
     capabilities: Array.isArray(p.capabilities)
@@ -945,18 +1082,19 @@ ipcMain.handle('hive:updateAgentMeta', (_evt, id: unknown, patch: unknown) => {
 // ─── IPC: full tool-call traces (transcript-mined payloads) ──────────────────
 // The live span buffer carries only metadata; this mines the agent's newest
 // Claude Code transcript for the full input/output of each tool call.
-ipcMain.handle('hive:traceDetails', (_evt, agentId: unknown, limit: unknown) => {
+ipcMain.handle('hive:traceDetails', (_evt, agentId: unknown, limit: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return [];
+  const r = rt(teamId);
   return traceDetails(
     agentId,
-    (id) => hive.registry().agents[id]?.cwd ?? null,
-    (id) => telemetry.getAgentSessionId(id),
+    (id) => r.hive.registry().agents[id]?.cwd ?? null,
+    (id) => r.telemetry.getAgentSessionId(id),
     typeof limit === 'number' ? limit : 200
   );
 });
 
 // ─── IPC: session cost totals (live per-agent usage from the OTel collector) ─
-ipcMain.handle('hive:costTotals', () => costTotalsFromUsage(telemetry.snapshot().usage));
+ipcMain.handle('hive:costTotals', (_evt, teamId?: unknown) => costTotalsFromUsage(rt(teamId).telemetry.snapshot().usage));
 
 // ─── IPC: shared semantic memory (Ollama embeddings + Supabase pgvector) ─────
 ipcMain.handle('hive:memoryStatus', () => { memory.resetProbe(); return memory.status(); });
@@ -968,11 +1106,11 @@ ipcMain.handle('hive:memoryWakeUp', (_evt, wing: unknown) =>
   memory.wakeUp(typeof wing === 'string' ? wing : undefined));
 // "Embed now": kick an immediate sync push so changed memory.md files are
 // chunked + embedded into the shared index without waiting for the next beat.
-ipcMain.handle('hive:mineNow', () => { void syncManager.pushNow(); return { ok: true }; });
+ipcMain.handle('hive:mineNow', (_evt, teamId?: unknown) => { void rt(teamId).syncManager.pushNow(); return { ok: true }; });
 // Condense memory.md on demand: an explicit id condenses that one agent (skips
 // the size trigger — a "condense now" button); no id runs a full threshold scan.
-ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>
-  reflector.reflectNow(typeof id === 'string' && id ? id : undefined));
+ipcMain.handle('memory:reflectNow', (_evt, id: unknown, teamId?: unknown) =>
+  rt(teamId).reflector.reflectNow(typeof id === 'string' && id ? id : undefined));
 
 // ─── IPC: command history (SQLite — every prompt submitted to an agent) ──────
 ipcMain.handle('history:add', (_evt, payload: unknown) => {
@@ -1007,32 +1145,109 @@ function teardownAndQuit(): void {
   app.quit();
 }
 ipcMain.handle('app:confirmClose', () => {
-  closingTime.cancel(); // a hard quit overrides a closing time in progress
+  cancelClosingTime(); // a hard quit overrides a closing time in progress
   teardownAndQuit();
 });
 ipcMain.handle('app:cancelClose', () => {
   // no-op — modal will close on the renderer side
 });
 
-// ─── IPC: closing time (graceful, data-loss-free shutdown) ──────────────────
-// The third quit-dialog button. The god broadcasts closing time, every worker
-// saves its memory and ACKs, the god concludes with CLOSING-TIME-COMPLETE —
-// only then does the harness tear down. See closingTime.ts for the protocol.
-const closingTime = new ClosingTimeController(
-  hive,
-  // Roster source: agents with a live PTY right now (ptyToAgent is pruned on
-  // every teardown). The registry alone would include ghost workers from
-  // sessions that ended with a hard quit — never archived, never able to ACK.
-  () => [...new Set(ptyToAgent.values())],
-  () => liveWebContents(),
-  () => teardownAndQuit(),
-  // #7C.2 steering — the graceful interrupt that reaches deeply busy agents
-  // at their next hook boundary instead of waiting for a Stop.
-  control
-);
-hive.setRoutedObserver((msg, targets) => closingTime.onRouted(msg, targets));
-ipcMain.handle('app:startClosingTime', () => closingTime.start());
-ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
+// ─── Closing time across ALL teams (graceful, data-loss-free shutdown, BE-8) ─
+// The third quit-dialog button. EVERY running team's god must run the protocol
+// (broadcast → workers save + ACK → god concludes with CLOSING-TIME-COMPLETE);
+// the app tears down only once every participating team has concluded. One
+// ClosingTimeController per team; progress is aggregated into one app-wide event.
+const closingControllers = new Map<string, ClosingTimeController>();
+const closingStates = new Map<string, ClosingTimeEvent>();
+const closingConcluded = new Set<string>();
+let closingTargets: string[] = []; // team ids currently running the protocol
+
+/** Lazily build (and cache) a team's controller, bound to its hive + control +
+ *  its own live-agent roster. Progress feeds the aggregate; conclusion is gated. */
+function controllerFor(teamId: string): ClosingTimeController {
+  let c = closingControllers.get(teamId);
+  if (!c) {
+    const r = rt(teamId);
+    c = new ClosingTimeController(
+      r.hive,
+      // Roster: agents of THIS team with a live PTY right now (ptyToAgent is
+      // pruned on every teardown; the registry alone would wait on ghosts).
+      () => [...new Set([...ptyToAgent.values()].filter((o) => o.teamId === teamId).map((o) => o.agentId))],
+      (ev) => { closingStates.set(teamId, ev); emitAggregateClosing(); },
+      () => onTeamConcluded(teamId),
+      // #7C.2 steering — reach deeply busy agents at their next hook boundary.
+      r.control
+    );
+    closingControllers.set(teamId, c);
+  }
+  return c;
+}
+
+/** Fold every participating team's state into ONE app-wide closing-time event so
+ *  the single quit modal shows aggregate progress: summed acked/total, and the
+ *  "weakest" phase (cancelled/timeout dominate; complete only when ALL complete). */
+function emitAggregateClosing(): void {
+  let acked = 0, total = 0;
+  let anyTimeout = false, anyCancelled = false, anyProgress = false;
+  let allComplete = closingTargets.length > 0;
+  for (const id of closingTargets) {
+    const ev = closingStates.get(id);
+    if (!ev) { allComplete = false; continue; }
+    acked += ev.acked; total += ev.total;
+    if (ev.phase === 'timeout') anyTimeout = true;
+    if (ev.phase === 'cancelled') anyCancelled = true;
+    if (ev.phase === 'started' || ev.phase === 'progress') anyProgress = true;
+    if (ev.phase !== 'complete') allComplete = false;
+  }
+  const phase: ClosingTimePhase =
+    anyCancelled ? 'cancelled' : anyTimeout ? 'timeout' : allComplete ? 'complete' : anyProgress ? 'progress' : 'started';
+  try { liveWebContents()?.send('app:closingTime', { phase, acked, total } satisfies ClosingTimeEvent); } catch { /* window gone */ }
+}
+
+/** A team's god concluded. Tear down only once EVERY participating team has. */
+function onTeamConcluded(teamId: string): void {
+  closingConcluded.add(teamId);
+  if (closingTargets.length > 0 && closingTargets.every((id) => closingConcluded.has(id))) {
+    teardownAndQuit();
+  }
+}
+
+/** Start closing time for every running team that has a live god. Returns an
+ *  error (UI falls back to hard quit) only when NO team can run it. */
+function startClosingTime(): { ok: boolean; error?: string } {
+  if (closingTargets.length > 0) {
+    // Re-pressed mid-protocol (e.g. from the timeout view): re-arm each team.
+    for (const id of closingTargets) controllerFor(id).start();
+    emitAggregateClosing();
+    return { ok: true };
+  }
+  closingStates.clear(); closingConcluded.clear();
+  const ran: string[] = []; const errs: string[] = [];
+  for (const [teamId, r] of teams) {
+    if (!r.isRunning()) continue;
+    const res = controllerFor(teamId).start();
+    if (res.ok) ran.push(teamId); else errs.push(res.error ?? `${teamId}: cannot run`);
+  }
+  if (ran.length === 0) {
+    closingControllers.clear();
+    return { ok: false, error: errs[0] ?? 'No orchestrator is running — closing time needs a god agent to collect the reports.' };
+  }
+  closingTargets = ran;
+  emitAggregateClosing();
+  return { ok: true };
+}
+
+/** Human cancelled — stand every team's floor back up and reset. */
+function cancelClosingTime(): void {
+  for (const id of closingTargets) closingControllers.get(id)?.cancel();
+  closingTargets = [];
+  closingStates.clear();
+  closingConcluded.clear();
+  closingControllers.clear();
+}
+
+ipcMain.handle('app:startClosingTime', () => startClosingTime());
+ipcMain.handle('app:cancelClosingTime', () => cancelClosingTime());
 
 // ─── IPC: full reset (wipe data + config, relaunch into onboarding) ──────────
 ipcMain.handle('app:resetAll', () => {
@@ -1070,9 +1285,9 @@ ipcMain.handle('hive:agentUsage', (_evt, cwd: unknown) =>
 // spawn), so this works even when several agents share one cwd. Null until the
 // first hook fires; a known-but-empty transcript reads as 0 so a freshly
 // (re)started session zeroes the gauge instead of leaving a stale value up.
-ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
+ipcMain.handle('hive:agentContext', (_evt, agentId: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return null;
-  const tp = hookServer.transcriptPath(agentId);
+  const tp = rt(teamId).hookServer.transcriptPath(agentId);
   if (!tp) return null;
   return readContextTokens(tp) ?? 0;
 });
@@ -1080,80 +1295,93 @@ ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
 // ─── IPC: live telemetry (the OTel collector — the locked usage-provider seam) ─
 // The fleet grid + span waterfall (#7B) read these; Lane A's breaker (#6)
 // consumes getAgentUsage in-process via the provider, not over IPC.
-ipcMain.handle('telemetry:usage', (_evt, agentId: unknown) =>
-  typeof agentId === 'string' ? telemetry.getAgentUsage(agentId) : null);
-ipcMain.handle('telemetry:spans', (_evt, agentId: unknown) =>
-  typeof agentId === 'string' ? telemetry.getSpans(agentId) : []);
-ipcMain.handle('telemetry:snapshot', () => telemetry.snapshot());
+ipcMain.handle('telemetry:usage', (_evt, agentId: unknown, teamId?: unknown) =>
+  typeof agentId === 'string' ? rt(teamId).telemetry.getAgentUsage(agentId) : null);
+ipcMain.handle('telemetry:spans', (_evt, agentId: unknown, teamId?: unknown) =>
+  typeof agentId === 'string' ? rt(teamId).telemetry.getSpans(agentId) : []);
+ipcMain.handle('telemetry:snapshot', (_evt, teamId?: unknown) => rt(teamId).telemetry.snapshot());
 
 // ─── IPC: circuit-breaker state (Lane A #6 policy → this lane's avatars/meter) ─
 // Lane A's breaker calls this with a BreakerState; we fan it out to the renderer
 // on `control:breakerState`, where the avatar adapter gives it precedence over
 // hook-derived status (#5C looping/zombie). Defined here so the channel exists
 // before Jim's policy lands; he produces, this lane consumes.
-ipcMain.handle('control:setBreakerState', (_evt, state: unknown) => {
-  try { liveWebContents()?.send('control:breakerState', state); } catch { /* window tore down */ }
+ipcMain.handle('control:setBreakerState', (_evt, state: unknown, teamId?: unknown) => {
+  rt(teamId).emit('control:breakerState', state);
   return { ok: true };
 });
 
 // ─── IPC: operator control over agents (#7C.1–7C.3) ─────────────────────────
-// All return the agent's fresh control snapshot so the UI can reflect state.
-ipcMain.handle('control:pause', (_evt, agentId: unknown, on: unknown) => {
+// All return the agent's fresh control snapshot so the UI can reflect state. The
+// control registry is per-team, so each takes a trailing optional teamId.
+ipcMain.handle('control:pause', (_evt, agentId: unknown, on: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return null;
-  control.pause(agentId, on === true);
-  return control.snapshot(agentId);
+  const c = rt(teamId).control;
+  c.pause(agentId, on === true);
+  return c.snapshot(agentId);
 });
-ipcMain.handle('control:resume', (_evt, agentId: unknown) => {
+ipcMain.handle('control:resume', (_evt, agentId: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return null;
-  control.resume(agentId);
-  return control.snapshot(agentId);
+  const c = rt(teamId).control;
+  c.resume(agentId);
+  return c.snapshot(agentId);
 });
-ipcMain.handle('control:gateTool', (_evt, agentId: unknown, tool: unknown, on: unknown) => {
+ipcMain.handle('control:gateTool', (_evt, agentId: unknown, tool: unknown, on: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string' || typeof tool !== 'string') return null;
-  control.gateTool(agentId, tool, on === true);
-  return control.snapshot(agentId);
+  const c = rt(teamId).control;
+  c.gateTool(agentId, tool, on === true);
+  return c.snapshot(agentId);
 });
-ipcMain.handle('control:steer', (_evt, agentId: unknown, text: unknown) => {
+ipcMain.handle('control:steer', (_evt, agentId: unknown, text: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string' || typeof text !== 'string') return null;
-  control.steer(agentId, text);
-  return control.snapshot(agentId);
+  const c = rt(teamId).control;
+  c.steer(agentId, text);
+  return c.snapshot(agentId);
 });
-ipcMain.handle('control:halt', (_evt, agentId: unknown) => {
+ipcMain.handle('control:halt', (_evt, agentId: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return null;
-  control.halt(agentId);
-  return control.snapshot(agentId);
+  const c = rt(teamId).control;
+  c.halt(agentId);
+  return c.snapshot(agentId);
 });
-ipcMain.handle('control:snapshot', (_evt, agentId: unknown) =>
-  typeof agentId === 'string' ? control.snapshot(agentId) : null);
+ipcMain.handle('control:snapshot', (_evt, agentId: unknown, teamId?: unknown) =>
+  typeof agentId === 'string' ? rt(teamId).control.snapshot(agentId) : null);
 
 // ─── IPC: scheduled missions (recurring auto-dispatch) ──────────────────────
-ipcMain.handle('missions:list', () => readConfig().missions ?? []);
-ipcMain.handle('missions:save', (_evt, missions) => {
+// Per-team with global fallback: omitted teamId → the default team's list (which
+// is the global config.missions, byte-identical to the legacy path).
+ipcMain.handle('missions:list', (_evt, teamId?: unknown) =>
+  teamMissions(typeof teamId === 'string' ? teamId : DEFAULT_TEAM_ID));
+ipcMain.handle('missions:save', (_evt, missions: unknown, teamId?: unknown) => {
+  const id = typeof teamId === 'string' ? teamId : DEFAULT_TEAM_ID;
   // lastFiredAt is scheduler-owned. The renderer loads missions once and later
   // sends back a STALE array, so a wholesale write would clobber every
   // lastFiredAt the scheduler has stamped since. Merge by id and keep the newer
   // lastFiredAt (almost always the persisted one) so the UI can never erase it.
   const incoming = (Array.isArray(missions) ? missions : []) as ScheduledMission[];
-  const persistedById = new Map(
-    (readConfig().missions ?? []).map((m) => [m.id, m] as const)
-  );
+  const persistedById = new Map(teamMissions(id).map((m) => [m.id, m] as const));
   const merged = incoming.map((m) => {
     const prevLastFired = persistedById.get(m.id)?.lastFiredAt ?? 0;
     const lastFiredAt = Math.max(m.lastFiredAt ?? 0, prevLastFired) || undefined;
     return { ...m, lastFiredAt };
   });
-  writeConfig({ missions: merged });
-  // Global config.missions is the DEFAULT team's mission list; re-arm its
-  // scheduler. (BE-7 threads a teamId so per-team mission edits re-arm the right
-  // runtime; until then missions:save targets the default team.)
-  defaultRuntime.syncMissions();
+  setTeamMissions(id, merged);
+  rt(id).syncMissions(); // re-arm the right team's scheduler
   return { ok: true };
 });
 
+// ─── IPC: teams (multi-team — list / clone / lifecycle events) ──────────────
+// teams:remove is intentionally OUT of v1 (no removal surface).
+ipcMain.handle('teams:list', (): TeamSummary[] => teamSummaries());
+ipcMain.handle('teams:clone', async (_evt, sourceTeamId: unknown, newName: unknown): Promise<CloneTeamResult> => {
+  if (typeof newName !== 'string' || !newName.trim()) return { ok: false, error: 'A team name is required.' };
+  return cloneTeam(typeof sourceTeamId === 'string' ? sourceTeamId : DEFAULT_TEAM_ID, newName.trim());
+});
+
 // ─── IPC: full-text search across hive files (board, tasks, memory) ──────────
-ipcMain.handle('hive:textSearch', (_evt, query: unknown) => {
+ipcMain.handle('hive:textSearch', (_evt, query: unknown, teamId?: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, results: [] };
-  const root = hive.root();
+  const root = rt(teamId).hive.root();
   if (!root) return { ok: false, results: [] };
   const q = query.toLowerCase();
   const results: Array<{ source: string; excerpt: string }> = [];

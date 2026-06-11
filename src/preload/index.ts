@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type { AgentProvider } from '../shared/agentProvider';
+import type { TeamSummary, TeamEvent, CloneTeamResult } from '../shared/teams';
 
 // Injected at build time from package.json (see electron.vite.config.ts).
 declare const __APP_VERSION__: string;
@@ -112,6 +113,9 @@ export interface SpawnPtyOptions {
   /** When true, continue the agent's prior CLI session if one was recorded
    *  (provider-aware: Claude `--resume`, Antigravity `--conversation`). */
   resume?: boolean;
+  /** Which team this agent belongs to (BE-6). Omitted → the default team. Routes
+   *  hive provisioning + env injection + the ptyToAgent record to that team. */
+  teamId?: string;
 }
 
 export interface PtyExit { exitCode: number; signal?: number | undefined }
@@ -523,30 +527,47 @@ const api = {
   gitAheadBehind: (cwd: string) =>
     ipcRenderer.invoke('git:aheadBehind', cwd) as Promise<{ ahead: number; behind: number; upstream: string | null } | { error: string }>,
 
+  // ─── Teams (multi-team — list / clone / lifecycle events) ────────────────
+  /** All registered teams with live running/agentCount. */
+  teamsList: (): Promise<TeamSummary[]> => ipcRenderer.invoke('teams:list'),
+  /** Clone a team (configs-only, fresh start) and bring it up live in parallel. */
+  cloneTeam: (sourceTeamId: string, newName: string): Promise<CloneTeamResult> =>
+    ipcRenderer.invoke('teams:clone', sourceTeamId, newName),
+  /** Subscribe to team lifecycle events (created / status). Returns unsubscribe fn. */
+  onTeamsEvent: (cb: (ev: TeamEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, ev: TeamEvent) => cb(ev);
+    ipcRenderer.on('teams:event', listener);
+    return () => ipcRenderer.removeListener('teams:event', listener);
+  },
+
   // ─── Hive (multi-agent coordination) ─────────────────────────────────────
-  hiveRegistry: (): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry'),
-  hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
+  // Every per-team query takes a trailing optional `teamId`; omitted → the
+  // default team (back-compat). Push events (below) carry `teamId` in the payload.
+  hiveRegistry: (teamId?: string): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry', teamId),
+  hiveBoard: (teamId?: string): Promise<string> => ipcRenderer.invoke('hive:board', teamId),
   /** Overwrite the shared blackboard (the Notepad's Scratchpad). Writes board.md
    *  + bumps the LWW stamps so the next sync beat pushes it. */
-  setBoard: (body: string): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('hive:setBoard', body),
-  hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
-  hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
-  hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
-  hiveInbox: (id: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id),
+  setBoard: (body: string, teamId?: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('hive:setBoard', body, teamId),
+  hiveTasks: (teamId?: string): Promise<unknown> => ipcRenderer.invoke('hive:tasks', teamId),
+  hiveLog: (n?: number, teamId?: string): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200, teamId),
+  hiveMemory: (id: string, teamId?: string): Promise<string> => ipcRenderer.invoke('hive:memory', id, teamId),
+  hiveInbox: (id: string, teamId?: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id, teamId),
 
   // ─── Shared semantic memory (Ollama embeddings + Supabase pgvector) ──────
+  // memoryStatus/search/wakeUp use the GLOBAL Ollama memory; mineNow + reflectNow
+  // are per-team (trailing optional teamId).
   memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('hive:memoryStatus'),
   searchMemory: (query: string, wing?: string): Promise<{ ok: boolean; output: string; error?: string }> =>
     ipcRenderer.invoke('hive:searchMemory', query, wing),
   memoryWakeUp: (wing?: string): Promise<{ ok: boolean; output: string; error?: string }> =>
     ipcRenderer.invoke('hive:memoryWakeUp', wing),
-  mineNow: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('hive:mineNow'),
+  mineNow: (teamId?: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('hive:mineNow', teamId),
   /** Condense agent memory.md files (the janitor's missing half). With an id,
    *  condense that agent on demand; without, run a full threshold scan. Returns
    *  the per-agent outcomes ({ id, condensed, reason, oldBytes?, newBytes? }). */
-  reflectNow: (id?: string): Promise<Array<{ id: string; condensed: boolean; reason: string; oldBytes?: number; newBytes?: number }>> =>
-    ipcRenderer.invoke('memory:reflectNow', id),
+  reflectNow: (id?: string, teamId?: string): Promise<Array<{ id: string; condensed: boolean; reason: string; oldBytes?: number; newBytes?: number }>> =>
+    ipcRenderer.invoke('memory:reflectNow', id, teamId),
 
   // ─── Command history (SQLite — every prompt submitted to an agent) ─────────
   /** Record one submitted prompt. Fire-and-forget from the prompt-detection hook. */
@@ -558,43 +579,43 @@ const api = {
   /** Substring search over prompt text, most-recent-first. */
   historySearch: (query: string, limit?: number): Promise<CommandHistoryEntry[]> =>
     ipcRenderer.invoke('history:search', query, limit),
-  hiveSend: (msg: Partial<HiveMessage>, from?: string): Promise<{ ok: boolean; error?: string; message?: HiveMessage }> =>
-    ipcRenderer.invoke('hive:send', msg, from),
+  hiveSend: (msg: Partial<HiveMessage>, from?: string, teamId?: string): Promise<{ ok: boolean; error?: string; message?: HiveMessage }> =>
+    ipcRenderer.invoke('hive:send', msg, from, teamId),
 
   onHiveHookEvent: (
-    cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => void
+    cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean; teamId?: string }) => void
   ): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => cb(payload);
+    const listener = (_e: IpcRendererEvent, payload: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean; teamId?: string }) => cb(payload);
     ipcRenderer.on('hive:hookEvent', listener);
     return () => ipcRenderer.removeListener('hive:hookEvent', listener);
   },
   /** Push-based context accounting from the status line: live tokens + the
    *  session's EXACT context-window size. Same pattern as onHiveHookEvent. */
   onHiveContextUpdate: (
-    cb: (e: { agentId: string; tokens: number; limit: number }) => void
+    cb: (e: { agentId: string; tokens: number; limit: number; teamId?: string }) => void
   ): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { agentId: string; tokens: number; limit: number }) => cb(payload);
+    const listener = (_e: IpcRendererEvent, payload: { agentId: string; tokens: number; limit: number; teamId?: string }) => cb(payload);
     ipcRenderer.on('hive:contextUpdate', listener);
     return () => ipcRenderer.removeListener('hive:contextUpdate', listener);
   },
-  onHiveMessage: (cb: (e: HiveRouteEvent) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: HiveRouteEvent) => cb(payload);
+  onHiveMessage: (cb: (e: HiveRouteEvent & { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: HiveRouteEvent & { teamId?: string }) => cb(payload);
     ipcRenderer.on('hive:message', listener);
     return () => ipcRenderer.removeListener('hive:message', listener);
   },
   /** Register a listener for hive tasks routed to non-Claude agents (e.g.
    *  Codex). Main emits this instead of bouncing; the renderer enqueues the
    *  raw text so the drain effect types it into the agent's REPL when idle. */
-  onHiveEnqueue: (cb: (e: { targetId: string; text: string }) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { targetId: string; text: string }) => cb(payload);
+  onHiveEnqueue: (cb: (e: { targetId: string; text: string; teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { targetId: string; text: string; teamId?: string }) => cb(payload);
     ipcRenderer.on('hive:enqueueToAgent', listener);
     return () => ipcRenderer.removeListener('hive:enqueueToAgent', listener);
   },
   /** Register a listener for terminal work-order handoffs (#53) — hive mail to a
    *  hookless provider that can't drain an inbox; the renderer types it into the
    *  agent's REPL as a work order. */
-  onHiveTerminalHandoff: (cb: (e: HiveTerminalHandoffEvent) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: HiveTerminalHandoffEvent) => cb(payload);
+  onHiveTerminalHandoff: (cb: (e: HiveTerminalHandoffEvent & { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: HiveTerminalHandoffEvent & { teamId?: string }) => cb(payload);
     ipcRenderer.on('hive:terminalHandoff', listener);
     return () => ipcRenderer.removeListener('hive:terminalHandoff', listener);
   },
@@ -638,90 +659,94 @@ const api = {
   /** Current context size (tokens) of an agent's live session, read from the
    *  last assistant message of its transcript. Null until the agent's hooks
    *  have fired at least once (the transcript path is learned from them). */
-  agentContext: (agentId: string): Promise<number | null> =>
-    ipcRenderer.invoke('hive:agentContext', agentId),
+  agentContext: (agentId: string, teamId?: string): Promise<number | null> =>
+    ipcRenderer.invoke('hive:agentContext', agentId, teamId),
 
   // ─── Live telemetry (OTel collector — the usage-provider seam + spans) ──────
   /** Live cumulative usage for an agent (OTel-preferred, transcript fallback). */
-  telemetryUsage: (agentId: string): Promise<AgentUsageSample | null> =>
-    ipcRenderer.invoke('telemetry:usage', agentId),
+  telemetryUsage: (agentId: string, teamId?: string): Promise<AgentUsageSample | null> =>
+    ipcRenderer.invoke('telemetry:usage', agentId, teamId),
   /** Recent tool spans for an agent's waterfall (#7B.2). */
-  telemetrySpans: (agentId: string): Promise<ToolSpan[]> =>
-    ipcRenderer.invoke('telemetry:spans', agentId),
+  telemetrySpans: (agentId: string, teamId?: string): Promise<ToolSpan[]> =>
+    ipcRenderer.invoke('telemetry:spans', agentId, teamId),
   /** Cold-start backfill of all agents' usage + recent spans. */
-  telemetrySnapshot: (): Promise<TelemetrySnapshot> =>
-    ipcRenderer.invoke('telemetry:snapshot'),
-  /** Subscribe to live telemetry pushes; returns an unsubscribe fn. */
-  onTelemetryEvent: (cb: (e: TelemetryEvent) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: TelemetryEvent) => cb(payload);
+  telemetrySnapshot: (teamId?: string): Promise<TelemetrySnapshot> =>
+    ipcRenderer.invoke('telemetry:snapshot', teamId),
+  /** Subscribe to live telemetry pushes; returns an unsubscribe fn. Each event
+   *  carries `teamId` so the renderer routes it to the right team's slice. */
+  onTelemetryEvent: (cb: (e: TelemetryEvent & { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: TelemetryEvent & { teamId?: string }) => cb(payload);
     ipcRenderer.on('telemetry:event', listener);
     return () => ipcRenderer.removeListener('telemetry:event', listener);
   },
 
   // ─── Circuit breaker (Lane A #6 state → avatars/meter) ──────────────────────
-  /** Subscribe to breaker-state changes; returns an unsubscribe fn. */
-  onBreakerState: (cb: (s: BreakerState) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: BreakerState) => cb(payload);
+  /** Subscribe to breaker-state changes; returns an unsubscribe fn. Carries teamId. */
+  onBreakerState: (cb: (s: BreakerState & { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: BreakerState & { teamId?: string }) => cb(payload);
     ipcRenderer.on('control:breakerState', listener);
     return () => ipcRenderer.removeListener('control:breakerState', listener);
   },
   /** Push a breaker state to the renderer (Lane A's policy / interim glue calls this). */
-  setBreakerState: (state: BreakerState): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('control:setBreakerState', state),
+  setBreakerState: (state: BreakerState, teamId?: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('control:setBreakerState', state, teamId),
 
   // ─── Operator control over agents (#7C.1–7C.3) ──────────────────────────────
+  // The control registry is per-team; each takes a trailing optional teamId.
   /** Pause/unpause an agent — paused → its tool calls are denied at PreToolUse. */
-  controlPause: (agentId: string, on: boolean): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:pause', agentId, on),
+  controlPause: (agentId: string, on: boolean, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:pause', agentId, on, teamId),
   /** Clear pause + halt so the agent can run again. */
-  controlResume: (agentId: string): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:resume', agentId),
+  controlResume: (agentId: string, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:resume', agentId, teamId),
   /** Gate/ungate a specific tool for an agent (denied at PreToolUse). */
-  controlGateTool: (agentId: string, tool: string, on: boolean): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:gateTool', agentId, tool, on),
+  controlGateTool: (agentId: string, tool: string, on: boolean, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:gateTool', agentId, tool, on, teamId),
   /** Queue a steer note — injected as context on the agent's next hook (#7C.2). */
-  controlSteer: (agentId: string, text: string): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:steer', agentId, text),
+  controlSteer: (agentId: string, text: string, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:steer', agentId, text, teamId),
   /** Request a graceful stop at the next hook boundary (#7C.3). */
-  controlHalt: (agentId: string): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:halt', agentId),
+  controlHalt: (agentId: string, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:halt', agentId, teamId),
   /** Read an agent's current control snapshot. */
-  controlSnapshot: (agentId: string): Promise<AgentControlSnapshot | null> =>
-    ipcRenderer.invoke('control:snapshot', agentId),
+  controlSnapshot: (agentId: string, teamId?: string): Promise<AgentControlSnapshot | null> =>
+    ipcRenderer.invoke('control:snapshot', agentId, teamId),
   /** Subscribe to gate/deny events (a tool was blocked); returns unsubscribe fn. */
-  onApprovalRequest: (cb: (e: { agentId: string; tool?: string; reason?: string }) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { agentId: string; tool?: string; reason?: string }) => cb(payload);
+  onApprovalRequest: (cb: (e: { agentId: string; tool?: string; reason?: string; teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { agentId: string; tool?: string; reason?: string; teamId?: string }) => cb(payload);
     ipcRenderer.on('control:approvalRequest', listener);
     return () => ipcRenderer.removeListener('control:approvalRequest', listener);
   },
 
   // ─── Task kanban (hive/tasks.json) ───────────────────────────────────────
   /** Overwrite the hive task ledger with the full task list and commit it. */
-  hiveWriteTasks: (tasks: HiveTask[]): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('hive:writeTasks', tasks),
+  hiveWriteTasks: (tasks: HiveTask[], teamId?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('hive:writeTasks', tasks, teamId),
 
   // ─── Scheduled missions (recurring auto-dispatch) ──────────────────────────
-  listMissions: (): Promise<ScheduledMission[]> => ipcRenderer.invoke('missions:list'),
-  saveMissions: (missions: ScheduledMission[]): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('missions:save', missions),
+  listMissions: (teamId?: string): Promise<ScheduledMission[]> => ipcRenderer.invoke('missions:list', teamId),
+  saveMissions: (missions: ScheduledMission[], teamId?: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('missions:save', missions, teamId),
   /** Fires when the scheduler stamps a mission's lastFiredAt (a beat/dispatch),
-   *  so the SCHEDULES panel can refresh "last fired" without a reload. */
-  onMissionsUpdated: (cb: () => void): (() => void) => {
-    const listener = (): void => cb();
+   *  so the SCHEDULES panel can refresh "last fired" without a reload. Carries
+   *  the team's id so the renderer refreshes the right team. */
+  onMissionsUpdated: (cb: (e?: { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload?: { teamId?: string }): void => cb(payload);
     ipcRenderer.on('missions:updated', listener);
     return () => ipcRenderer.removeListener('missions:updated', listener);
   },
   /** Fires when an autoCompact mission ticks — the renderer queues a /compact
-   *  per agent (deduped) and delivers it when each agent is idle. */
-  onAutoCompact: (cb: () => void): (() => void) => {
-    const listener = (): void => cb();
+   *  per agent (deduped) and delivers it when each agent is idle. Carries teamId
+   *  so only that team's terminals are compacted. */
+  onAutoCompact: (cb: (e?: { teamId?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload?: { teamId?: string }): void => cb(payload);
     ipcRenderer.on('mission:autoCompact', listener);
     return () => ipcRenderer.removeListener('mission:autoCompact', listener);
   },
 
   // ─── Full-text search across hive files (board, tasks, memory) ─────────────
-  textSearch: (q: string): Promise<{ ok: boolean; results: Array<{ source: string; excerpt: string }> }> =>
-    ipcRenderer.invoke('hive:textSearch', q),
+  textSearch: (q: string, teamId?: string): Promise<{ ok: boolean; results: Array<{ source: string; excerpt: string }> }> =>
+    ipcRenderer.invoke('hive:textSearch', q, teamId),
 
   // ─── GitHub issue ingestion (gh CLI) ───────────────────────────────────────
   /** List up to 30 open issues in the repo at `cwd` via the `gh` CLI. Returns
@@ -744,34 +769,35 @@ const api = {
   // ─── Agent lifecycle (archival) ─────────────────────────────────────────────
   /** Archive/unarchive a hive agent in the registry. Closing a terminal tab
    *  archives it automatically via pty:kill; this is the explicit primitive. */
-  hiveSetArchived: (id: string, archived: boolean): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('hive:setArchived', id, archived),
+  hiveSetArchived: (id: string, archived: boolean, teamId?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('hive:setArchived', id, archived, teamId),
 
   // ─── Per-agent operator prompt + editable metadata ──────────────────────────
   /** The agent's composed system prompt split into the read-only base and the
    *  persisted operator-editable addendum (applied on the next respawn). */
-  getAgentPrompt: (id: string): Promise<AgentPromptInfo> =>
-    ipcRenderer.invoke('hive:getAgentPrompt', id),
+  getAgentPrompt: (id: string, teamId?: string): Promise<AgentPromptInfo> =>
+    ipcRenderer.invoke('hive:getAgentPrompt', id, teamId),
   /** Persist the operator's prompt addendum onto the agent's registry entry. */
-  setAgentPrompt: (id: string, custom: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('hive:setAgentPrompt', id, custom),
+  setAgentPrompt: (id: string, custom: string, teamId?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('hive:setAgentPrompt', id, custom, teamId),
   /** Merge editable per-agent metadata (name/role/capabilities) into the registry. */
   updateAgentMeta: (
     id: string,
-    patch: { name?: string; role?: string; capabilities?: string[] }
+    patch: { name?: string; role?: string; capabilities?: string[] },
+    teamId?: string
   ): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('hive:updateAgentMeta', id, patch),
+    ipcRenderer.invoke('hive:updateAgentMeta', id, patch, teamId),
 
   // ─── Full tool-call traces (transcript-mined payloads) ───────────────────────
   /** Full tool-call payloads for an agent, newest-first (default limit 200),
    *  mined from its Claude Code transcript. [] when unavailable. */
-  traceDetails: (agentId: string, limit?: number): Promise<TraceEvent[]> =>
-    ipcRenderer.invoke('hive:traceDetails', agentId, limit),
+  traceDetails: (agentId: string, limit?: number, teamId?: string): Promise<TraceEvent[]> =>
+    ipcRenderer.invoke('hive:traceDetails', agentId, limit, teamId),
 
   // ─── All-time cost totals (from <hive>/cost-ledger.jsonl) ────────────────────
   /** All-time per-agent + per-model token/USD totals plus a grand total. */
-  costTotals: (): Promise<CostTotals> =>
-    ipcRenderer.invoke('hive:costTotals'),
+  costTotals: (teamId?: string): Promise<CostTotals> =>
+    ipcRenderer.invoke('hive:costTotals', teamId),
 
   // ─── Slack integration (Slack message → the orchestrator's queue) ────────────
   /** Register a listener for inbound Slack messages; returns an unsubscribe fn.
