@@ -7,7 +7,7 @@ import { PtyManager, type SpawnOptions } from './pty';
 import {
   readConfig, writeConfig, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForRole, ensureDefaultTeam, DEFAULT_TEAM_ID,
-  listTeams, getTeam, addTeam, teamHome, teamMissions, setTeamMissions,
+  listTeams, getTeam, addTeam, removeTeam, teamHome, teamMissions, setTeamMissions,
   OPS_STANDUP_MISSION, HEARTBEAT_MISSION,
   type HarnessConfig, type ScheduledMission, type TeamConfig
 } from './config';
@@ -170,7 +170,10 @@ async function cloneTeam(sourceTeamId: string, newName: string): Promise<CloneTe
 
     // Copy the API key so the clone runs without re-entering it.
     try {
-      const srcKey = join(teamHome(home, sourceTeamId), 'hive', '.secrets', 'anthropic-api-key');
+      // N1 — resolve from source.teamId (not the raw arg): an unknown sourceTeamId
+      // falls back to defaultRuntime, so we copy the DEFAULT team's key rather than
+      // looking under a non-existent dir.
+      const srcKey = join(teamHome(home, source.teamId), 'hive', '.secrets', 'anthropic-api-key');
       if (existsSync(srcKey)) {
         const dstSecrets = join(teamHome(home, newId), 'hive', '.secrets');
         mkdirSync(dstSecrets, { recursive: true });
@@ -215,6 +218,12 @@ async function cloneTeam(sourceTeamId: string, newName: string): Promise<CloneTe
     });
     return { ok: true, teamId: newId };
   } catch (e) {
+    // SF-4 — roll back any partial state so a failed clone never persists as a
+    // phantom team (listed in the selector, auto-started next boot). De-register
+    // from config + the Map and remove the half-built dir; all best-effort.
+    try { teams.delete(newId); } catch { /* noop */ }
+    try { removeTeam(newId); } catch { /* noop */ }
+    try { rmSync(teamHome(home, newId), { recursive: true, force: true }); } catch { /* noop */ }
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
@@ -951,7 +960,11 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 
   if (mode === 'move' && oldHome) {
     try {
-      for (const sub of ['hive']) {
+      // MF-2 — copy the cloned-team subtree too (NO-MOVE put clones under teams/).
+      // Copying only hive/ would strand every clone's data + its copied API key in
+      // the old folder while config.teams still points at them. existsSync guards a
+      // no-teams install.
+      for (const sub of ['hive', 'teams']) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
         // cpSync copies the whole tree incl. .git and is cross-device safe (unlike
@@ -1263,7 +1276,11 @@ ipcMain.handle('app:resetAll', () => {
   // board, git history). Only this harness-created subdir is removed — never the
   // user's whole harnessHome folder, and never the SHARED semantic memory in
   // Supabase (that's team data; a local reset must not nuke teammates' recall).
-  for (const dir of [hive.root()]) {
+  // SF-3 — also erase the cloned-team subtree (NO-MOVE clones live under teams/,
+  // including their copied API keys); otherwise "reset & start over" leaves secret
+  // residue + orphan clone dirs on disk. resetConfig() below clears config.teams.
+  const resetHome = readConfig().harnessHome;
+  for (const dir of [hive.root(), resetHome ? join(resetHome, 'teams') : null]) {
     if (!dir) continue;
     try { rmSync(dir, { recursive: true, force: true }); }
     catch (e) { console.error('[reset] rm', dir, e); }
@@ -1663,6 +1680,14 @@ function bootstrapHiveServices(): void {
   // Register the legacy hive under the 'default' team (idempotent). godId is read
   // from the live registry so the default team records the existing god.
   try { ensureDefaultTeam(hive.registry().godId ?? 'god'); } catch (e) { console.error('[boot] ensureDefaultTeam:', e); }
+  // MF-1 — rehydrate persisted clones (NO-MOVE leaves their dirs on disk, but the
+  // teams Map only seeds 'default'). Without this, after a restart rt(cloneId)
+  // falls through to defaultRuntime and the clone's god silently drives the
+  // DEFAULT hive (cross-team corruption). Instantiate a runtime for every
+  // registered non-default team before the start loop.
+  for (const t of listTeams()) {
+    if (!teams.has(t.id)) teams.set(t.id, new TeamRuntime(t.id, teamDeps));
+  }
   memory.start(); // GLOBAL Ollama reachability probe (one per app; embedding rides each team's sync beat)
   for (const rt of teams.values()) rt.start();
 }
