@@ -1,15 +1,22 @@
 import { useEffect, useRef } from 'react';
-import { useStore, type Agent, type QueuedMessage, type StationKind, type ToolKind } from '@/store/store';
+import { useStore, DEFAULT_TEAM_ID, teamAgentEntries, type Agent, type GodStatus, type QueuedMessage, type StationKind, type ToolKind } from '@/store/store';
 import {
   buildSpawnCommand,
+  tokenizeCommand,
   ASSISTANT_MODEL,
   inferAgentProvider,
   isClaudeProvider,
   type HarnessConfig
 } from '@/store/config';
+import { teamsList, godPtyId, workerPtyId, teamCwd, teamIdOf, spawnPtyForTeam, hiveInboxFor } from '@/ipc/teams';
+import { AGENT_PRESETS } from '@/components/AddAgentModal';
 
 const GOD_ID = 'god';
-const GOD_PTY = `pty-${GOD_ID}`;
+
+// Per-team-agent ref key. The booking/dedup refs below (breaker level, inbox-wake
+// dedup, flush cooldown, boot grace) are keyed by this so two teams that both
+// have a `god`/`backend` never clobber each other's per-agent state.
+const rk = (teamId: string, agentId: string): string => `${teamId}:${agentId}`;
 
 // How long to let Claude Code's TUI finish booting before we type the first
 // thing into the orchestrator's terminal, and how long to PAUSE after the /remote-control
@@ -169,9 +176,14 @@ export function useHive(config: HarnessConfig | null): void {
   // 'working' (there's a short window where it still reads 'idle' right after we
   // type into it). One message per cooldown keeps delivery strictly one-by-one.
   const lastFlush = useRef<Record<string, number>>({});
-  // In-flight spawn guard so a re-render / StrictMode double-mount can't spawn
-  // the orchestrator twice (the window between the listPtys check and spawnPty is racy).
-  const godSpawning = useRef(false);
+  // In-flight spawn guard, per team, so a re-render / StrictMode double-mount
+  // can't spawn a team's orchestrator twice (the window between the listPtys
+  // check and spawnPty is racy).
+  const godSpawning = useRef<Set<string>>(new Set());
+  // In-flight WORKER-bootstrap guard, per team — so the clone worker-spawn loop
+  // (effect #1b) can't double-fire for the same team across re-renders / a
+  // teamList bump while a prior pass is still spawning.
+  const workersSpawning = useRef<Set<string>>(new Set());
   // Per-agent timestamp until which auto-typers (inbox-wake #3, queue-drain #4)
   // must leave the agent alone — set while its boot sequence is typing so nothing
   // collides with /remote-control + the orientation prompt.
@@ -179,43 +191,66 @@ export function useHive(config: HarnessConfig | null): void {
   const seenTerminalHandoffs = useRef<Set<string>>(new Set());
   // Reactive so the assistant bootstrap (effect #1b) re-runs once the orchestrator is ready.
   const godStatus = useStore((s) => s.godStatus);
+  // Reactive: a newly cloned team appended here must get its god bootstrapped too.
+  const teamList = useStore((s) => s.teamList);
   // #5C/#7C.4 — latest circuit-breaker level per agent. When 'constrained'/
   // 'stopped' the avatar is pinned to 'looping' and hook events must NOT flip it
   // back to 'working' (the flicker the spec calls out); only a genuine Stop clears it.
   const breakerLevel = useRef<Record<string, string>>({});
 
-  // 1) Bootstrap the god agent (source of truth = live PTYs, to dodge restarts).
+  // 1) Bootstrap EVERY team's god in parallel (FE-3). Teams are always-live, so
+  //    on app boot we iterate the team list and spawn each team's orchestrator
+  //    that isn't already running (source of truth = live PTYs, to dodge
+  //    restarts). A team is keyed by godPtyId(teamId) so two gods never collide.
   useEffect(() => {
     if (!config?.onboardingComplete || !config.harnessHome) return;
     let cancelled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
-    useStore.getState().setGodStatus('booting');
-    const t = setTimeout(async () => {
-      if (cancelled) return;
+
+    // Set/clear god status on the right slice (active team mirrors to flat fields).
+    const setGodStatusFor = (teamId: string, status: GodStatus): void => {
+      const st = useStore.getState();
+      if (teamId === st.activeTeamId) st.setGodStatus(status);
+      else st.applyToTeam(teamId, () => ({ godStatus: status }));
+    };
+    // Add the god to the right team's slice. Active team uses addAgent (selects +
+    // persists); background teams get a silent slice insert.
+    const addGodToTeam = (teamId: string, god: Agent): void => {
+      const st = useStore.getState();
+      if (teamId === st.activeTeamId) { st.addAgent(god); return; }
+      st.applyToTeam(teamId, (slice) => ({
+        agents: [...slice.agents.filter((a) => a.id !== god.id), god],
+        feeds: { ...slice.feeds, [god.id]: slice.feeds[god.id] ?? [] }
+      }));
+    };
+
+    const spawnGod = async (teamId: string): Promise<void> => {
+      const ptyId = godPtyId(teamId);
       const live = await window.cth.listPtys().catch(() => []);
-      if (live.some((p) => p.id === GOD_PTY)) { // already running — keep restored entry
-        if (!cancelled) useStore.getState().setGodStatus('ready');
+      if (live.some((p) => p.id === ptyId)) { // already running — keep restored entry
+        if (!cancelled) setGodStatusFor(teamId, 'ready');
         return;
       }
-      // Synchronous guard (no await between check and set) → exactly one spawn.
-      if (cancelled || godSpawning.current) return;
-      godSpawning.current = true;
-      useStore.getState().removeAgent(GOD_ID); // clear any stale restored entry
+      // Synchronous guard (no await between check and set) → exactly one spawn/team.
+      if (cancelled || godSpawning.current.has(teamId)) return;
+      godSpawning.current.add(teamId);
+      setGodStatusFor(teamId, 'booting');
 
+      const cwd = teamCwd(config.harnessHome!, teamId);
       const command = buildSpawnCommand(config, config.defaultModel, 'claude');
       const [exe, ...args] = command.trim().split(/\s+/);
-      const res = await window.cth.spawnPty({
-        id: GOD_PTY,
-        cwd: config.harnessHome!,
+      const res = await spawnPtyForTeam({
+        id: ptyId,
+        cwd,
         command: exe,
         provider: 'claude',
         args,
         cols: 100,
         rows: 30,
-        hive: { id: GOD_ID, name: 'Orchestrator', provider: 'claude', cwd: config.harnessHome!, isGod: true, role: 'orchestrator (god)' }
-      });
-      if (cancelled) { godSpawning.current = false; return; }
-      if (!res.ok) { godSpawning.current = false; useStore.getState().setGodStatus('failed'); return; }
+        hive: { id: GOD_ID, name: 'Orchestrator', provider: 'claude', cwd, isGod: true, role: 'orchestrator (god)' }
+      }, teamId);
+      if (cancelled) { godSpawning.current.delete(teamId); return; }
+      if (!res.ok) { godSpawning.current.delete(teamId); setGodStatusFor(teamId, 'failed'); return; }
       const god: Agent = {
         id: GOD_ID,
         name: 'Orchestrator',
@@ -223,51 +258,180 @@ export function useHive(config: HarnessConfig | null): void {
         description: 'god — coordinates the team, triages requests, escalates only critical calls to you',
         project: 'hive',
         tmuxTarget: '',
-        cwd: config.harnessHome!,
+        cwd,
         status: 'idle',
         action: 'coordinating the team',
         progress: 0,
         currentStation: 'desk',
-        ptyId: GOD_PTY,
+        ptyId,
         command: command.trim(),
         provider: 'claude',
         model: config.defaultModel,
         isGod: true,
         recentTextTs: Date.now()
       };
-      useStore.getState().addAgent(god);
-      useStore.getState().setGodStatus('ready');
+      addGodToTeam(teamId, god);
+      setGodStatusFor(teamId, 'ready');
+      godSpawning.current.delete(teamId);
 
       // Fresh spawn → kick the orchestrator off once its TUI is up. First enable
       // remote control so the human can approve permission prompts from their phone
-      // (best-effort — a failed/unknown slash command just prints to its terminal
-      // and is harmless), PAUSE so it lands on its own line, then hand it the
-      // orientation prompt. Both go through the per-pty submit chain, so they're
-      // strictly sequential and can't jam together; the boot-grace window keeps
-      // the inbox-wake/drain loops off the orchestrator until it's oriented. Restored
-      // sessions (the live-PTY branch above) skip this.
-      bootGraceUntil.current[GOD_ID] = Date.now() + BOOT_GRACE_MS;
+      // (best-effort), PAUSE so it lands on its own line, then hand it the
+      // orientation prompt. Both go through the per-pty submit chain (strictly
+      // sequential); the boot-grace window keeps the inbox-wake/drain loops off
+      // this god until it's oriented. Restored sessions skip this.
+      bootGraceUntil.current[rk(teamId, GOD_ID)] = Date.now() + BOOT_GRACE_MS;
       timers.push(setTimeout(() => {
         if (cancelled) return;
-        // settleMs pauses the chain ~1.5s after /remote-control before the
-        // orientation prompt is submitted next.
-        submitToPty(GOD_PTY, '/remote-control', REMOTE_CONTROL_SETTLE_MS).catch(() => { /* best-effort */ });
-        submitToPty(GOD_PTY, INITIAL_GOD_PROMPT).catch(() => { /* pty may have died */ });
+        submitToPty(ptyId, '/remote-control', REMOTE_CONTROL_SETTLE_MS).catch(() => { /* best-effort */ });
+        submitToPty(ptyId, INITIAL_GOD_PROMPT).catch(() => { /* pty may have died */ });
       }, GOD_BOOT_MS));
+    };
+
+    const t = setTimeout(async () => {
+      if (cancelled) return;
+      // Iterate the authoritative team list (falls back to the default team).
+      const teams = await teamsList().catch(() => []);
+      const ids = teams.length ? teams.map((tm) => tm.id) : [DEFAULT_TEAM_ID];
+      for (const teamId of ids) {
+        if (cancelled) break;
+        void spawnGod(teamId);
+      }
     }, 1200);
     return () => { cancelled = true; clearTimeout(t); timers.forEach(clearTimeout); };
-  }, [config?.onboardingComplete, config?.harnessHome]);
+    // teamList is a dep so a freshly cloned team's god is bootstrapped on append.
+  }, [config?.onboardingComplete, config?.harnessHome, teamList]);
+
+  // 1b) Bootstrap each team's WORKER roster (MT-CLONE-2 fix). A clone copies the
+  //     source roster into the new team's registry.json but spawns ZERO worker
+  //     PTYs, and a fresh clone's localStorage is empty — so only the per-team god
+  //     (effect #1) ever appears. This mirrors the god-bootstrap: for every team,
+  //     read its registry and spawn each non-god, non-assistant, non-archived
+  //     worker that isn't ALREADY live (listPtys) or ALREADY in the slice. That
+  //     in-slice skip is what leaves the default team's localStorage-restored
+  //     roster untouched (no regression) — only a fresh clone (empty slice + no
+  //     live PTYs) actually spawns here, yielding a fully-live working duplicate.
+  useEffect(() => {
+    if (!config?.onboardingComplete || !config.harnessHome) return;
+    let cancelled = false;
+
+    // Insert a freshly-spawned worker into the right team's slice. Active team uses
+    // addAgent (selects + persists); background teams get a silent slice insert —
+    // mirrors the god-bootstrap's addGodToTeam.
+    const addWorkerToTeam = (teamId: string, agent: Agent): void => {
+      const st = useStore.getState();
+      if (teamId === st.activeTeamId) { st.addAgent(agent); return; }
+      st.applyToTeam(teamId, (slice) => ({
+        agents: [...slice.agents.filter((a) => a.id !== agent.id), agent],
+        feeds: { ...slice.feeds, [agent.id]: slice.feeds[agent.id] ?? [] }
+      }));
+    };
+
+    const spawnWorkersForTeam = async (teamId: string): Promise<void> => {
+      // Synchronous guard (no await between the has-check and the add) → exactly
+      // one bootstrap pass per team, matching the god-bootstrap's godSpawning guard.
+      if (cancelled || workersSpawning.current.has(teamId)) return;
+      workersSpawning.current.add(teamId);
+      try {
+        // The team's authoritative roster = its registry.json (the configs a clone
+        // copied). No new IPC channel — the existing teamId-scoped query suffices.
+        const reg = await window.cth.hiveRegistry(teamId).catch(() => null);
+        if (!reg || cancelled) return;
+        const workers = Object.values(reg.agents).filter(
+          (m) => !m.isGod && !m.isAssistant && m.id !== reg.godId && !m.archived
+        );
+        if (!workers.length) return;
+        const live = await window.cth.listPtys().catch(() => []);
+        for (const meta of workers) {
+          if (cancelled) break;
+          const ptyId = workerPtyId(teamId, meta.id);
+          // Already running, or already represented in the slice (e.g. the default
+          // team's restored roster) → leave it alone. Re-read the slice each
+          // iteration so workers added earlier in THIS loop aren't re-spawned.
+          if (live.some((p) => p.id === ptyId)) continue;
+          if (useStore.getState().teams[teamId]?.agents.some((a) => a.id === meta.id)) continue;
+
+          // Spawn opts mirror AddAgentModal. Preserve each cloned agent's preset
+          // model/accent by id (cloned agents keep the source ids) so the duplicate
+          // is faithful; custom/non-preset agents fall back to the config defaults.
+          const preset = AGENT_PRESETS.find((p) => p.id === meta.id);
+          const provider = meta.provider ?? 'claude';
+          const model = isClaudeProvider(provider)
+            ? (preset?.model ?? config.defaultModel)
+            : undefined;
+          const command = buildSpawnCommand(config, model, provider);
+          const [exe, ...args] = tokenizeCommand(command.trim());
+          const res = await spawnPtyForTeam({
+            id: ptyId,
+            cwd: meta.cwd,
+            command: exe,
+            provider,
+            args,
+            cols: 100,
+            rows: 30,
+            hive: {
+              id: meta.id,
+              name: meta.name,
+              provider,
+              cwd: meta.cwd,
+              role: meta.role,
+              capabilities: meta.capabilities
+            }
+          }, teamId);
+          if (cancelled) break;
+          if (!res.ok) continue;
+          addWorkerToTeam(teamId, {
+            id: meta.id,
+            name: meta.name,
+            accent: preset?.accent ?? 'sky',
+            description: meta.role ?? 'a fresh harness',
+            project: meta.cwd.split('/').filter(Boolean).pop() ?? meta.cwd,
+            tmuxTarget: '',
+            cwd: meta.cwd,
+            status: 'idle',
+            action: 'starting up',
+            progress: 0,
+            currentStation: 'desk',
+            ptyId,
+            command: command.trim(),
+            provider,
+            model,
+            recentTextTs: Date.now()
+          });
+        }
+      } finally {
+        workersSpawning.current.delete(teamId);
+      }
+    };
+
+    // Fire slightly after the god-bootstrap (1200ms) so each team's god comes up
+    // first, then its workers join it.
+    const t = setTimeout(async () => {
+      if (cancelled) return;
+      const teams = await teamsList().catch(() => []);
+      const ids = teams.length ? teams.map((tm) => tm.id) : [DEFAULT_TEAM_ID];
+      for (const teamId of ids) {
+        if (cancelled) break;
+        void spawnWorkersForTeam(teamId);
+      }
+    }, 1600);
+    return () => { cancelled = true; clearTimeout(t); };
+    // teamList dep → a freshly cloned team's workers bootstrap on append.
+  }, [config?.onboardingComplete, config?.harnessHome, teamList]);
 
   // 2) Drive avatars from real hook events emitted by each agent's shim.
   useEffect(() => {
     return window.cth.onHiveHookEvent((e) => {
       if (!e.agentId) return;
-      const { updateAgent, agents } = useStore.getState();
-      const self = agents.find((a) => a.id === e.agentId);
+      // FE-2: demux by the event's team so off-screen teams' rosters stay current.
+      const teamId = teamIdOf(e);
+      const self = useStore.getState().teams[teamId]?.agents.find((a) => a.id === e.agentId);
       if (!self) return;
+      const updateAgent = (id: string, patch: Partial<Agent>): void =>
+        useStore.getState().updateAgentIn(teamId, id, patch);
       // Breaker precedence (#5C): a constrained/stopped agent stays 'looping'
       // regardless of in-flight tool/prompt/compact events.
-      const blevel = breakerLevel.current[e.agentId];
+      const blevel = breakerLevel.current[rk(teamId, e.agentId)];
       const breakerArmed = blevel === 'constrained' || blevel === 'stopped';
       // Hook events are the authoritative status source for real agents (the
       // pty-stream parser only refines the action/station).
@@ -279,7 +443,7 @@ export function useHive(config: HarnessConfig | null): void {
       } else if (e.event === 'PreToolUse' && e.tool) {
         const m = stationForTool(e.tool);
         if (!breakerArmed) updateAgent(e.agentId, { status: 'working', currentStation: m.station, carrying: m.carry, action: `using ${e.tool}` });
-        useStore.getState().bumpToolCount(e.agentId); // usage proxy for the command center
+        useStore.getState().bumpToolCountIn(teamId, e.agentId); // usage proxy for the command center
       } else if (e.event === 'PostToolUse' || e.event === 'UserPromptSubmit') {
         // A turn is in progress (prompt submitted / tool just finished) — keep
         // it working so it doesn't flicker idle between tool calls.
@@ -300,7 +464,7 @@ export function useHive(config: HarnessConfig | null): void {
           if (!breakerArmed) updateAgent(e.agentId, { status: 'working', action: 'reading inbox', carrying: undefined });
         } else {
           // A genuine stop clears any breaker override — the run is over.
-          breakerLevel.current[e.agentId] = 'healthy';
+          breakerLevel.current[rk(teamId, e.agentId)] = 'healthy';
           updateAgent(e.agentId, { status: 'idle', action: 'idle', carrying: undefined });
         }
       } else if (e.event === 'Notification' && !breakerArmed) {
@@ -338,11 +502,12 @@ export function useHive(config: HarnessConfig | null): void {
   //     'looping' (see the breakerArmed guard above) until it genuinely Stops.
   useEffect(() => {
     return window.cth.onBreakerState((s) => {
-      breakerLevel.current[s.agentId] = s.level;
-      const { updateAgent, agents } = useStore.getState();
-      if (!agents.some((a) => a.id === s.agentId)) return;
+      const teamId = teamIdOf(s);
+      breakerLevel.current[rk(teamId, s.agentId)] = s.level;
+      const slice = useStore.getState().teams[teamId];
+      if (!slice?.agents.some((a) => a.id === s.agentId)) return;
       if (s.level === 'constrained' || s.level === 'stopped') {
-        updateAgent(s.agentId, { status: 'looping', action: s.reason || 'breaker armed', carrying: undefined });
+        useStore.getState().updateAgentIn(teamId, s.agentId, { status: 'looping', action: s.reason || 'breaker armed', carrying: undefined });
       }
       // 'healthy'/'steering' clear the pin; the next hook event refreshes status.
     });
@@ -380,13 +545,14 @@ export function useHive(config: HarnessConfig | null): void {
   //     EXACT context accounting (tokens + real window size) after every
   //     response — no probing, no transcript guesswork.
   useEffect(() => {
-    return window.cth.onHiveContextUpdate(({ agentId, tokens, limit }) => {
+    return window.cth.onHiveContextUpdate((e) => {
+      const { agentId, tokens, limit } = e;
       // Defense-in-depth: the main process already filters limit > 0, but the
       // renderer must not trust IPC blindly — limit 0 would put NaN progress
       // into the store (NaN survives the Math.min/max clamp).
       if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(tokens)) return;
       const progress = Math.max(0, Math.min(8, Math.round((tokens / limit) * 8)));
-      useStore.getState().updateAgent(agentId, { contextTokens: tokens, contextLimit: limit, progress });
+      useStore.getState().updateAgentIn(teamIdOf(e), agentId, { contextTokens: tokens, contextLimit: limit, progress });
     });
   }, []);
 
@@ -397,11 +563,14 @@ export function useHive(config: HarnessConfig | null): void {
     if (!config?.onboardingComplete) return;
     return window.cth.onHiveTerminalHandoff((msg) => {
       if (seenTerminalHandoffs.current.has(msg.id)) return;
-      const { agents, enqueueMessage, messageQueues } = useStore.getState();
-      const target = agents.find((a) => a.id === msg.to);
+      const teamId = teamIdOf(msg);
+      const slice = useStore.getState().teams[teamId];
+      const enqueueMessage = (agentId: string, text: string): void =>
+        useStore.getState().enqueueMessageIn(teamId, agentId, text);
+      const target = slice?.agents.find((a) => a.id === msg.to);
       if (target?.ptyId) {
         const marker = `Message: ${msg.id}`;
-        if ((messageQueues[target.id] ?? []).some((queued) => queued.text.includes(marker))) return;
+        if ((slice?.messageQueues[target.id] ?? []).some((queued) => queued.text.includes(marker))) return;
         seenTerminalHandoffs.current.add(msg.id);
         enqueueMessage(target.id, terminalWorkOrderPrompt(msg));
         return;
@@ -424,28 +593,31 @@ export function useHive(config: HarnessConfig | null): void {
     if (!config?.onboardingComplete) return;
     const iv = setInterval(async () => {
       const now = Date.now();
-      const agents = useStore.getState().agents.filter(
-        (a) => a.ptyId && (a.status === 'idle' || a.status === 'waiting')
+      // Iterate EVERY team's agents — background teams stay live, so their idle
+      // agents must still be woken for unread inbox mail (keyed per team+agent).
+      const entries = teamAgentEntries(useStore.getState()).filter(
+        ({ teamId, agent: a }) => a.ptyId && (a.status === 'idle' || a.status === 'waiting')
           // Don't type into an agent still running its boot sequence — the nudge
           // would collide with /remote-control + the orientation prompt.
-          && (bootGraceUntil.current[a.id] ?? 0) < now
+          && (bootGraceUntil.current[rk(teamId, a.id)] ?? 0) < now
       );
-      for (const a of agents) {
+      for (const { teamId, agent: a } of entries) {
         try {
-          const inbox = await window.cth.hiveInbox(a.id);
+          const inbox = await hiveInboxFor(a.id, teamId);
           // Dedup by the newest message id, not the count — a count can oscillate
           // as messages drain and re-arrive, which would re-nudge for the same set.
           const newest = inbox.length
             ? inbox.map((m) => m.id).sort().slice(-1)[0]
             : '';
-          if (newest && nudged.current[a.id] !== newest) {
-            nudged.current[a.id] = newest;
+          const nkey = rk(teamId, a.id);
+          if (newest && nudged.current[nkey] !== newest) {
+            nudged.current[nkey] = newest;
             await submitToPty(
               a.ptyId!,
               'You have new hive inbox message(s) — read your inbox, act on them now, and move handled ones to inbox/.done/. Act autonomously; only message god if you genuinely need a decision.'
             );
           } else if (!newest) {
-            nudged.current[a.id] = '';
+            nudged.current[nkey] = '';
           }
         } catch { /* ignore */ }
       }
@@ -464,22 +636,23 @@ export function useHive(config: HarnessConfig | null): void {
     // Send the front of `srcId`'s queue into `target`'s pty (verbatim or wrapped),
     // gated on the target being idle + off cooldown. Keyed cooldown per target so
     // strict one-by-one delivery holds. Returns true if it dispatched.
-    const dispatch = (srcId: string, target: Agent | undefined, wrap?: (m: QueuedMessage) => string): boolean => {
-      const { messageQueues, removeQueuedMessage } = useStore.getState();
-      const next = messageQueues[srcId]?.[0];
+    const dispatch = (teamId: string, srcId: string, target: Agent | undefined, wrap?: (m: QueuedMessage) => string): boolean => {
+      const slice = useStore.getState().teams[teamId];
+      const next = slice?.messageQueues[srcId]?.[0];
       if (!next || !target?.ptyId || target.status !== 'idle') return false;
       const now = Date.now();
+      const tkey = rk(teamId, target.id);
       // Hold queued messages until the target finishes its boot sequence.
-      if ((bootGraceUntil.current[target.id] ?? 0) >= now) return false;
-      if (now - (lastFlush.current[target.id] ?? 0) < FLUSH_COOLDOWN_MS) return false;
-      lastFlush.current[target.id] = now;
+      if ((bootGraceUntil.current[tkey] ?? 0) >= now) return false;
+      if (now - (lastFlush.current[tkey] ?? 0) < FLUSH_COOLDOWN_MS) return false;
+      lastFlush.current[tkey] = now;
       // Remove first so a burst of store updates can't double-send the same one.
-      removeQueuedMessage(srcId, next.id);
+      useStore.getState().removeQueuedMessageIn(teamId, srcId, next.id);
       // Zero the gauge instantly on /clear — the new session's context isn't
       // known until statusLine fires after the first post-clear response, so
       // leaving it at the old value shows a stale-full bar during that window.
       if (next.text.trim().toLowerCase() === '/clear') {
-        useStore.getState().updateAgent(target.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
+        useStore.getState().updateAgentIn(teamId, target.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
       }
       submitToPty(target.ptyId, wrap ? wrap(next) : next.text).catch(() => { /* pty may have died */ });
       return true;
@@ -519,14 +692,14 @@ export function useHive(config: HarnessConfig | null): void {
     };
 
     const flush = () => {
-      const { agents, messageQueues } = useStore.getState();
-      const byId = (id: string) => agents.find((a) => a.id === id);
-
-      for (const a of agents) {
+      // Drain across ALL teams — a background team's queued messages must still be
+      // delivered the moment its agent idles (the PTY is live regardless of view).
+      for (const { teamId, agent: a } of teamAgentEntries(useStore.getState())) {
         if (!a.ptyId || a.status !== 'idle') continue;
-        if (!messageQueues[a.id]?.length) continue;
-        const head = messageQueues[a.id][0];
-        if (dispatch(a.id, a) && head.slack) void ensureSlackCard(head);
+        const queue = useStore.getState().teams[teamId]?.messageQueues[a.id];
+        if (!queue?.length) continue;
+        const head = queue[0];
+        if (dispatch(teamId, a.id, a) && head.slack) void ensureSlackCard(head);
       }
     };
 
@@ -556,7 +729,9 @@ export function useHive(config: HarnessConfig | null): void {
       const text = msg.text.trim();
       if (!text) return;
       const slack = { channel: msg.channel, thread_ts: msg.thread_ts };
-      useStore.getState().enqueueMessage(GOD_ID, text, { slack });
+      // Slack/webhook are global singletons routed to ONE primary team (the
+      // default), per architect §7.3 — enqueue to that god, not the active team.
+      useStore.getState().enqueueMessageIn(DEFAULT_TEAM_ID, GOD_ID, text, { slack });
       // Immediate "queued" acknowledgement in the originating Slack thread.
       void window.cth.slackReply({
         channel: msg.channel,
@@ -575,7 +750,7 @@ export function useHive(config: HarnessConfig | null): void {
     if (!config?.onboardingComplete) return;
     return window.cth.onHiveEnqueue?.((msg) => {
       if (!msg?.targetId || !msg?.text?.trim()) return;
-      useStore.getState().enqueueMessage(msg.targetId, msg.text.trim());
+      useStore.getState().enqueueMessageIn(teamIdOf(msg), msg.targetId, msg.text.trim());
     });
   }, [config?.onboardingComplete]);
 
@@ -585,16 +760,19 @@ export function useHive(config: HarnessConfig | null): void {
   //    is already queued for an agent, skip it (no second one piles up).
   useEffect(() => {
     if (!config?.onboardingComplete) return;
-    return window.cth.onAutoCompact(() => {
-      const { agents, messageQueues, enqueueMessage } = useStore.getState();
-      for (const a of agents) {
+    return window.cth.onAutoCompact((e?: { teamId?: string }) => {
+      // The tick may target one team (e.teamId) or, when arg-less, all teams.
+      const only = e && typeof e === 'object' ? e.teamId : undefined;
+      const entries = teamAgentEntries(useStore.getState())
+        .filter(({ teamId }) => !only || teamId === only);
+      for (const { teamId, agent: a } of entries) {
         if (!a.ptyId) continue;
         // /compact is a Claude Code slash command — non-Claude CLIs (agy, codex)
         // would just receive it as literal prompt text. Skip them.
         if (!isClaudeProvider(inferAgentProvider(a.command, a.provider))) continue;
-        const queued = messageQueues[a.id] ?? [];
+        const queued = useStore.getState().teams[teamId]?.messageQueues[a.id] ?? [];
         if (queued.some((m) => m.text.trimStart().startsWith('/compact'))) continue;
-        enqueueMessage(a.id, COMPACT_CMD);
+        useStore.getState().enqueueMessageIn(teamId, a.id, COMPACT_CMD);
       }
     });
   }, [config?.onboardingComplete]);

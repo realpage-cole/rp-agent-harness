@@ -201,16 +201,28 @@ function ensureMineIgnore(agentDir: string): void {
 // ─── HiveManager ────────────────────────────────────────────────────────────
 
 export class HiveManager {
+  /** Which team this hive belongs to. Multi-team: each team gets its own
+   *  HiveManager whose `getHome` resolves to that team's home (default team →
+   *  harnessHome; clones → `<harnessHome>/teams/<id>`), so the root + every
+   *  root-relative read/write is team-correct with no per-callsite edits. Used
+   *  for logging and the teamId stamp on emitted renderer events. */
+  readonly teamId: string;
+
   /**
-   * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
+   * @param getHome  Lazily resolve this team's home so the hive follows config changes.
    * @param emit     Optional sink for renderer-facing events (set by the main
    *                 process to `webContents.send`). Used to surface routed
-   *                 messages in the dashboard; a no-op in tests/headless.
+   *                 messages in the dashboard; a no-op in tests/headless. The
+   *                 main process wraps this to stamp `teamId` on every payload.
+   * @param teamId   Owning team id (defaults to the legacy 'default' team).
    */
   constructor(
     private getHome: () => string | null,
-    private emit?: (channel: string, payload: unknown) => boolean | void
-  ) {}
+    private emit?: (channel: string, payload: unknown) => boolean | void,
+    teamId = 'default'
+  ) {
+    this.teamId = teamId;
+  }
 
   private routerTimer: NodeJS.Timeout | null = null;
 
@@ -429,6 +441,23 @@ export class HiveManager {
     const args: string[] = [];
     if (!claudeProvider) return { args, env };
 
+    // Billing — ALL Claude agents (incl. god) authenticate via an Anthropic API
+    // key so usage bills to the API/console org rather than an OAuth subscription.
+    // The key also auths a fresh CLAUDE_CONFIG_DIR (which bypasses the macOS
+    // keychain), so it doubles as the isolated workers' credential — replacing the
+    // earlier `claude setup-token` OAuth token (which billed the subscription and
+    // triggered an override warning on interactive /login). Kept out of git.
+    try {
+      const keyFile = join(root, '.secrets', 'anthropic-api-key');
+      if (existsSync(keyFile)) {
+        const key = readFileSync(keyFile, 'utf8').trim();
+        if (key) env.ANTHROPIC_API_KEY = key;
+      }
+    } catch { /* best-effort: fall back to the home's own auth */ }
+    // Never carry a subscription OAuth token into the spawn env — it would
+    // override the API key and silently bill the subscription instead.
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+
     // RES-4 — FULL per-agent tool isolation: each WORKER gets its own Claude config
     // home so it only sees the MCP servers + plugins provisioned into it
     // (hive/agent-tooling.json + hive/bin/provision_agent_tools.py). god is the
@@ -437,15 +466,6 @@ export class HiveManager {
       const cchome = join(dir, '.cchome');
       mkdirSync(cchome, { recursive: true });
       env.CLAUDE_CONFIG_DIR = cchome;
-      // CLAUDE_CONFIG_DIR bypasses the macOS keychain, so carry auth via a
-      // long-lived token (`claude setup-token`), kept out of git.
-      try {
-        const tokFile = join(root, '.secrets', 'cc-oauth-token');
-        if (existsSync(tokFile)) {
-          const tok = readFileSync(tokFile, 'utf8').trim();
-          if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
-        }
-      } catch { /* best-effort: fall back to the home's own auth */ }
       // Seed onboarding + workspace trust once so a fresh isolated home never prompts.
       const cfgJson = join(cchome, '.claude.json');
       if (!existsSync(cfgJson)) {

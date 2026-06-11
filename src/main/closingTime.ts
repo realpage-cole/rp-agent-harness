@@ -23,7 +23,6 @@
  *
  * Runs in the Electron main process.
  */
-import type { WebContents } from 'electron';
 import type { HiveManager, HiveMessage } from './hive';
 import type { ControlRegistry } from './control';
 
@@ -65,8 +64,12 @@ export class ClosingTimeController {
      *  their registry record without ever being flagged `archived`, so a
      *  registry-based roster waits on ghosts that can never ACK. */
     private getLiveAgentIds: () => string[],
-    private getWebContents: () => WebContents | null,
-    /** Called once the god concluded — runs the real teardown + app.quit(). */
+    /** Sink for progress/lifecycle events. Single-team: send straight to the
+     *  renderer on app:closingTime. Multi-team: the coordinator aggregates each
+     *  team's state into one app-wide event (BE-8). */
+    private onState: (ev: ClosingTimeEvent) => void,
+    /** Called once THIS team's god concluded. Multi-team: the coordinator gates
+     *  the real teardown + app.quit() until every team has concluded. */
     private onConcluded: () => void,
     /** Mid-run steering (#7C.2): lets closing time reach DEEPLY BUSY agents at
      *  their next hook boundary instead of waiting for the Stop-hook inbox
@@ -232,6 +235,6 @@ export class ClosingTimeController {
 
   private emitState(phase: ClosingTimePhase): void {
     const ev: ClosingTimeEvent = { phase, acked: this.acked.size, total: this.workers.size };
-    try { this.getWebContents()?.send('app:closingTime', ev); } catch { /* window tore down */ }
+    try { this.onState(ev); } catch { /* sink best-effort */ }
   }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useStore, selectedAgent } from '@/store/store';
+import { useStore, selectedAgent, teamAgentEntries } from '@/store/store';
+import { teamsList, onTeamsEvent } from '@/ipc/teams';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { DashboardView } from '@/components/dashboard/DashboardView';
@@ -49,6 +50,22 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Multi-team: hydrate the team list from the main process, then keep it live
+  // off `teams:event`. A 'created' event (e.g. after a clone) appends the team —
+  // useHive's bootstrap effect (dep on teamList) then spawns its god; 'status'
+  // refreshes the selector's running/agentCount badges.
+  useEffect(() => {
+    let cancelled = false;
+    teamsList().then((list) => { if (!cancelled) useStore.getState().setTeamList(list); });
+    const off = onTeamsEvent((ev) => {
+      if (ev.kind === 'created') useStore.getState().upsertTeam(ev.summary);
+      else if (ev.kind === 'status') {
+        useStore.getState().upsertTeam({ id: ev.teamId, running: ev.running, agentCount: ev.agentCount });
+      }
+    });
+    return () => { cancelled = true; off(); };
+  }, []);
+
   // Quit warning subscription
   useEffect(() => window.cth.onCloseRequested((info) => setQuitWarn(info)), []);
 
@@ -74,11 +91,16 @@ export function App() {
   useHive(config);
 
   // Pre-warm a persistent terminal for every live agent so its output is
-  // buffered from spawn. Switching agents then re-attaches an already-rendered
-  // terminal instantly (with full history) instead of building a blank one.
+  // buffered from spawn. Switching agents/teams then re-attaches an already-
+  // rendered terminal instantly (with full history) instead of building a blank
+  // one. ALL teams (not just the active one) are pre-warmed so background teams'
+  // streams keep buffering off-screen and a team switch is instant (FE-6/§7.7).
+  const teams = useStore((s) => s.teams);
   useEffect(() => {
-    for (const a of agents) if (a.ptyId) acquireTerminal(a.ptyId);
-  }, [agents]);
+    for (const { agent: a } of teamAgentEntries(useStore.getState())) {
+      if (a.ptyId) acquireTerminal(a.ptyId);
+    }
+  }, [teams]);
 
   // Synthetic demo loop — CAGED (#5B). It must never animate alongside a live
   // hive (it would fire fake envelope handoffs and step seeded agents). Run it

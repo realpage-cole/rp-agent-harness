@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useStore } from '@/store/store';
+import { teamIdOf, telemetrySnapshotFor, telemetrySpansFor } from '@/ipc/teams';
 
 /**
  * Renderer-side consumers of the live telemetry stream (#7B).
@@ -93,9 +95,15 @@ export function useFleetTelemetry(): FleetTelemetry {
   const [lastTool, setLastTool] = useState<Record<string, string>>({});
   const [breakers, setBreakers] = useState<Record<string, BreakerState>>({});
   const rates = useRef<Record<string, Rate>>({});
+  // FE-2: telemetry is per-team. The fleet grid shows the in-view team; we
+  // re-backfill on switch and drop pushes stamped for other teams.
+  const activeTeamId = useStore((s) => s.activeTeamId);
 
   useEffect(() => {
     let alive = true;
+    // Reset on team switch so the grid never shows a stale team's fleet.
+    setSamples({}); setSpark({}); setRate({}); setLastTool({}); setBreakers({});
+    rates.current = {};
 
     const foldUsage = (s: AgentUsageSample): void => {
       setSamples((prev) => ({ ...prev, [s.agentId]: s }));
@@ -115,8 +123,9 @@ export function useFleetTelemetry(): FleetTelemetry {
       }
     };
 
-    // Backfill from the snapshot (we missed the pushes before mount).
-    window.cth.telemetrySnapshot?.().then((snap) => {
+    // Backfill from the snapshot (we missed the pushes before mount), scoped to
+    // the active team.
+    (telemetrySnapshotFor(activeTeamId) as Promise<{ usage?: unknown[]; spans?: Record<string, unknown> } | undefined>).then((snap) => {
       if (!alive || !snap) return;
       for (const s of snap.usage ?? []) foldUsage(s as AgentUsageSample);
       const tools: Record<string, string> = {};
@@ -128,15 +137,17 @@ export function useFleetTelemetry(): FleetTelemetry {
     }).catch(() => { /* collector not up — empty grid */ });
 
     const offEvent = window.cth.onTelemetryEvent?.((e: TelemetryEvent) => {
+      if (teamIdOf(e) !== activeTeamId) return; // other team's push — ignore here
       if (e.kind === 'usage') foldUsage(e.sample);
       else if (e.kind === 'tool_result') setLastTool((prev) => ({ ...prev, [e.span.agentId]: e.span.tool }));
     });
     const offBreaker = window.cth.onBreakerState?.((s: BreakerState) => {
+      if (teamIdOf(s) !== activeTeamId) return;
       setBreakers((prev) => ({ ...prev, [s.agentId]: s }));
     });
 
     return () => { alive = false; offEvent?.(); offBreaker?.(); };
-  }, []);
+  }, [activeTeamId]);
 
   return { samples, spark, rate, lastTool, breakers };
 }
@@ -147,15 +158,19 @@ export function useFleetTelemetry(): FleetTelemetry {
  */
 export function useAgentSpans(agentId: string): ToolSpan[] {
   const [spans, setSpans] = useState<ToolSpan[]>([]);
+  // Spans are per-team; the viewed agent belongs to the active team, and two
+  // teams can share an agent id (e.g. `god`), so scope by the active team.
+  const activeTeamId = useStore((s) => s.activeTeamId);
 
   useEffect(() => {
     let alive = true;
     setSpans([]);
-    window.cth.telemetrySpans?.(agentId).then((s) => {
+    (telemetrySpansFor(agentId, activeTeamId) as Promise<unknown>).then((s) => {
       if (alive && Array.isArray(s)) setSpans(s as ToolSpan[]);
     }).catch(() => { /* none yet */ });
 
     const off = window.cth.onTelemetryEvent?.((e: TelemetryEvent) => {
+      if (teamIdOf(e) !== activeTeamId) return;
       if (e.kind === 'tool_result' && e.span.agentId === agentId) {
         setSpans((prev) => [...prev, e.span].slice(-200));
       } else if (e.kind === 'api_error' && e.agentId === agentId) {
@@ -166,7 +181,7 @@ export function useAgentSpans(agentId: string): ToolSpan[] {
       }
     });
     return () => { alive = false; off?.(); };
-  }, [agentId]);
+  }, [agentId, activeTeamId]);
 
   return spans;
 }

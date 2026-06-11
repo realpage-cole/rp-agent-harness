@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Multiple teams in parallel (Clone Team).** The harness now runs any number of fully independent hives at once. Each team is a `TeamRuntime` (`src/main/teamRuntime.ts`) bundling its own `HiveManager`, god orchestrator, hook server, telemetry collector (on its own ephemeral loopback port), circuit breaker, control registry, reflector, and sync manager; the main process holds a `Map<teamId, TeamRuntime>`. A **Clone Team** button copies an existing team's per-agent configs (roster, providers, prompts, API key) into a fresh team that starts clean — empty memory, board, tasks, and inboxes, fresh `git init`, and its own `syncWorkspaceId`. A dashboard **team selector** switches which team you're viewing while the others keep running in the background; per-team events are stamped with `teamId` and land in a per-team renderer store slice. **No-move:** the existing hive stays at `<harnessHome>/hive/` and clones live under `<harnessHome>/teams/<id>/`. Inbound Slack/webhook messages route to the default team. (`teams:list` / `teams:clone` / `teams:event` IPC; team removal not yet exposed.)
+- **Per-agent tool isolation via `CLAUDE_CONFIG_DIR`.** Each worker now spawns with its own `CLAUDE_CONFIG_DIR` at `<agentDir>/.cchome` (seeded with onboarding + workspace-trust accepted), so its MCP servers, plugins, and Claude Code session state are isolated to that agent and provisioned per-agent instead of inherited from the global `~/.claude`. The god orchestrator keeps the shared home for full access.
+
+### Changed
+- **All agents bill the API account.** Every agent — workers *and* god — is now spawned with `ANTHROPIC_API_KEY` read from the team hive's `.secrets/anthropic-api-key`, replacing the previous OAuth subscription token. Any inherited `CLAUDE_CODE_OAUTH_TOKEN` is stripped from the spawn env so it can't silently override the key and bill the subscription.
+
 ## [0.2.3] — 2026-06-09
 
 A multi-provider release: the harness is no longer Claude-only. Antigravity (Gemini)
