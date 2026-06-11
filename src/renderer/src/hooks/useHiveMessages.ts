@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useStore } from '@/store/store';
+import { teamIdOf } from '@/ipc/teams';
 
 /** The act a routed hive message carried — mirrors HiveRouteEvent.act. */
 export type MessageAct =
@@ -37,11 +39,15 @@ export function useHiveMessages(cap = DEFAULT_CAP): FeedMessage[] {
   const [messages, setMessages] = useState<FeedMessage[]>([]);
   const capRef = useRef(cap);
   capRef.current = cap;
+  // FE-2: the activity feed shows the in-view team; reset + filter on switch.
+  const activeTeamId = useStore((s) => s.activeTeamId);
 
   useEffect(() => {
+    setMessages([]);
     const sub = window.cth.onHiveMessage;
     if (!sub) return; // onHiveMessage unavailable this session — empty feed
     const off = sub((e) => {
+      if (teamIdOf(e) !== activeTeamId) return; // another team's message
       const entry: FeedMessage = {
         id: e.id || nextLocalId(),
         from: e.from,
@@ -54,7 +60,7 @@ export function useHiveMessages(cap = DEFAULT_CAP): FeedMessage[] {
       setMessages((prev) => [entry, ...prev].slice(0, capRef.current));
     });
     return () => { off(); };
-  }, []);
+  }, [activeTeamId]);
 
   return messages;
 }
