@@ -16,7 +16,7 @@ import {
   providerPreset,
   isClaudeProvider
 } from '@/store/config';
-import { spawnPtyForTeam } from '@/ipc/teams';
+import { spawnPtyForTeam, workerPtyId } from '@/ipc/teams';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
 
@@ -156,7 +156,12 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     // A preset pins the id (so it maps to its pre-seeded charter); custom agents
     // get a fresh unique id as before.
     const id = selectedPreset?.id ?? uniqueId(name);
-    const ptyId = `pty-${id}`;
+    // FE-7 + MT-CLONE-3: scope the PTY id to the team this agent joins so adding a
+    // worker to a non-default/cloned team can't collide with another team's PTY in
+    // the main process's global session map. Capture the team once so the ptyId and
+    // the spawn below target the SAME team even if the active team changes mid-submit.
+    const teamId = useStore.getState().activeTeamId;
+    const ptyId = workerPtyId(teamId, id);
     // Split the editable command field into argv-style pieces for node-pty.
     // Quote-aware so an agy model label like "Gemini 3.1 Pro (High)" — or any
     // auto-mode flags appended to the command — stays one argument.
@@ -181,7 +186,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         role: description.trim() || undefined,
         capabilities: selectedPreset?.capabilities ?? prefillCapabilities
       }
-    }, useStore.getState().activeTeamId);
+    }, teamId);
     if (!spawnRes.ok) {
       setBusy(false);
       setError(spawnRes.error ?? 'spawn failed');

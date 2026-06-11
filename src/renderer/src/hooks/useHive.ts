@@ -328,17 +328,19 @@ export function useHive(config: HarnessConfig | null): void {
     };
 
     const spawnWorkersForTeam = async (teamId: string): Promise<void> => {
+      // Synchronous guard (no await between the has-check and the add) → exactly
+      // one bootstrap pass per team, matching the god-bootstrap's godSpawning guard.
       if (cancelled || workersSpawning.current.has(teamId)) return;
-      // The team's authoritative roster = its registry.json (the configs a clone
-      // copied). No new IPC channel — the existing teamId-scoped query suffices.
-      const reg = await window.cth.hiveRegistry(teamId).catch(() => null);
-      if (!reg || cancelled) return;
-      const workers = Object.values(reg.agents).filter(
-        (m) => !m.isGod && !m.isAssistant && m.id !== reg.godId && !m.archived
-      );
-      if (!workers.length) return;
       workersSpawning.current.add(teamId);
       try {
+        // The team's authoritative roster = its registry.json (the configs a clone
+        // copied). No new IPC channel — the existing teamId-scoped query suffices.
+        const reg = await window.cth.hiveRegistry(teamId).catch(() => null);
+        if (!reg || cancelled) return;
+        const workers = Object.values(reg.agents).filter(
+          (m) => !m.isGod && !m.isAssistant && m.id !== reg.godId && !m.archived
+        );
+        if (!workers.length) return;
         const live = await window.cth.listPtys().catch(() => []);
         for (const meta of workers) {
           if (cancelled) break;
