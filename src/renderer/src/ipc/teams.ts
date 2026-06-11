@@ -84,6 +84,16 @@ export function godPtyId(teamId: string): string {
   return teamId === DEFAULT_TEAM_ID ? 'pty-god' : `pty-${teamId}-god`;
 }
 
+/** Deterministic PTY id for a team's WORKER (non-god) agent. The default team
+ *  keeps the legacy `pty-<agentId>` (so restored sessions + AddAgentModal-spawned
+ *  workers reattach with no regression); other teams are scoped by teamId so a
+ *  cloned roster — which reuses the SOURCE team's agent ids — can't collide with
+ *  the source's PTYs in the main process's global, ptyId-keyed session map
+ *  (ptyManager rejects a duplicate id). Mirrors `godPtyId`. */
+export function workerPtyId(teamId: string, agentId: string): string {
+  return teamId === DEFAULT_TEAM_ID ? `pty-${agentId}` : `pty-${teamId}-${agentId}`;
+}
+
 /** A team's on-disk base path, used as the god's cwd when spawning. Derived from
  *  the architect's storage layout (§2): default team at <harnessHome>, other teams
  *  at <harnessHome>/teams/<id>. NOTE: integration risk — if backend resolves the

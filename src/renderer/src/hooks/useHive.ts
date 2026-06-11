@@ -2,12 +2,14 @@ import { useEffect, useRef } from 'react';
 import { useStore, DEFAULT_TEAM_ID, teamAgentEntries, type Agent, type GodStatus, type QueuedMessage, type StationKind, type ToolKind } from '@/store/store';
 import {
   buildSpawnCommand,
+  tokenizeCommand,
   ASSISTANT_MODEL,
   inferAgentProvider,
   isClaudeProvider,
   type HarnessConfig
 } from '@/store/config';
-import { teamsList, godPtyId, teamCwd, teamIdOf, spawnPtyForTeam, hiveInboxFor } from '@/ipc/teams';
+import { teamsList, godPtyId, workerPtyId, teamCwd, teamIdOf, spawnPtyForTeam, hiveInboxFor } from '@/ipc/teams';
+import { AGENT_PRESETS } from '@/components/AddAgentModal';
 
 const GOD_ID = 'god';
 
@@ -178,6 +180,10 @@ export function useHive(config: HarnessConfig | null): void {
   // can't spawn a team's orchestrator twice (the window between the listPtys
   // check and spawnPty is racy).
   const godSpawning = useRef<Set<string>>(new Set());
+  // In-flight WORKER-bootstrap guard, per team — so the clone worker-spawn loop
+  // (effect #1b) can't double-fire for the same team across re-renders / a
+  // teamList bump while a prior pass is still spawning.
+  const workersSpawning = useRef<Set<string>>(new Set());
   // Per-agent timestamp until which auto-typers (inbox-wake #3, queue-drain #4)
   // must leave the agent alone — set while its boot sequence is typing so nothing
   // collides with /remote-control + the orientation prompt.
@@ -294,6 +300,121 @@ export function useHive(config: HarnessConfig | null): void {
     }, 1200);
     return () => { cancelled = true; clearTimeout(t); timers.forEach(clearTimeout); };
     // teamList is a dep so a freshly cloned team's god is bootstrapped on append.
+  }, [config?.onboardingComplete, config?.harnessHome, teamList]);
+
+  // 1b) Bootstrap each team's WORKER roster (MT-CLONE-2 fix). A clone copies the
+  //     source roster into the new team's registry.json but spawns ZERO worker
+  //     PTYs, and a fresh clone's localStorage is empty — so only the per-team god
+  //     (effect #1) ever appears. This mirrors the god-bootstrap: for every team,
+  //     read its registry and spawn each non-god, non-assistant, non-archived
+  //     worker that isn't ALREADY live (listPtys) or ALREADY in the slice. That
+  //     in-slice skip is what leaves the default team's localStorage-restored
+  //     roster untouched (no regression) — only a fresh clone (empty slice + no
+  //     live PTYs) actually spawns here, yielding a fully-live working duplicate.
+  useEffect(() => {
+    if (!config?.onboardingComplete || !config.harnessHome) return;
+    let cancelled = false;
+
+    // Insert a freshly-spawned worker into the right team's slice. Active team uses
+    // addAgent (selects + persists); background teams get a silent slice insert —
+    // mirrors the god-bootstrap's addGodToTeam.
+    const addWorkerToTeam = (teamId: string, agent: Agent): void => {
+      const st = useStore.getState();
+      if (teamId === st.activeTeamId) { st.addAgent(agent); return; }
+      st.applyToTeam(teamId, (slice) => ({
+        agents: [...slice.agents.filter((a) => a.id !== agent.id), agent],
+        feeds: { ...slice.feeds, [agent.id]: slice.feeds[agent.id] ?? [] }
+      }));
+    };
+
+    const spawnWorkersForTeam = async (teamId: string): Promise<void> => {
+      if (cancelled || workersSpawning.current.has(teamId)) return;
+      // The team's authoritative roster = its registry.json (the configs a clone
+      // copied). No new IPC channel — the existing teamId-scoped query suffices.
+      const reg = await window.cth.hiveRegistry(teamId).catch(() => null);
+      if (!reg || cancelled) return;
+      const workers = Object.values(reg.agents).filter(
+        (m) => !m.isGod && !m.isAssistant && m.id !== reg.godId && !m.archived
+      );
+      if (!workers.length) return;
+      workersSpawning.current.add(teamId);
+      try {
+        const live = await window.cth.listPtys().catch(() => []);
+        for (const meta of workers) {
+          if (cancelled) break;
+          const ptyId = workerPtyId(teamId, meta.id);
+          // Already running, or already represented in the slice (e.g. the default
+          // team's restored roster) → leave it alone. Re-read the slice each
+          // iteration so workers added earlier in THIS loop aren't re-spawned.
+          if (live.some((p) => p.id === ptyId)) continue;
+          if (useStore.getState().teams[teamId]?.agents.some((a) => a.id === meta.id)) continue;
+
+          // Spawn opts mirror AddAgentModal. Preserve each cloned agent's preset
+          // model/accent by id (cloned agents keep the source ids) so the duplicate
+          // is faithful; custom/non-preset agents fall back to the config defaults.
+          const preset = AGENT_PRESETS.find((p) => p.id === meta.id);
+          const provider = meta.provider ?? 'claude';
+          const model = isClaudeProvider(provider)
+            ? (preset?.model ?? config.defaultModel)
+            : undefined;
+          const command = buildSpawnCommand(config, model, provider);
+          const [exe, ...args] = tokenizeCommand(command.trim());
+          const res = await spawnPtyForTeam({
+            id: ptyId,
+            cwd: meta.cwd,
+            command: exe,
+            provider,
+            args,
+            cols: 100,
+            rows: 30,
+            hive: {
+              id: meta.id,
+              name: meta.name,
+              provider,
+              cwd: meta.cwd,
+              role: meta.role,
+              capabilities: meta.capabilities
+            }
+          }, teamId);
+          if (cancelled) break;
+          if (!res.ok) continue;
+          addWorkerToTeam(teamId, {
+            id: meta.id,
+            name: meta.name,
+            accent: preset?.accent ?? 'sky',
+            description: meta.role ?? 'a fresh harness',
+            project: meta.cwd.split('/').filter(Boolean).pop() ?? meta.cwd,
+            tmuxTarget: '',
+            cwd: meta.cwd,
+            status: 'idle',
+            action: 'starting up',
+            progress: 0,
+            currentStation: 'desk',
+            ptyId,
+            command: command.trim(),
+            provider,
+            model,
+            recentTextTs: Date.now()
+          });
+        }
+      } finally {
+        workersSpawning.current.delete(teamId);
+      }
+    };
+
+    // Fire slightly after the god-bootstrap (1200ms) so each team's god comes up
+    // first, then its workers join it.
+    const t = setTimeout(async () => {
+      if (cancelled) return;
+      const teams = await teamsList().catch(() => []);
+      const ids = teams.length ? teams.map((tm) => tm.id) : [DEFAULT_TEAM_ID];
+      for (const teamId of ids) {
+        if (cancelled) break;
+        void spawnWorkersForTeam(teamId);
+      }
+    }, 1600);
+    return () => { cancelled = true; clearTimeout(t); };
+    // teamList dep → a freshly cloned team's workers bootstrap on append.
   }, [config?.onboardingComplete, config?.harnessHome, teamList]);
 
   // 2) Drive avatars from real hook events emitted by each agent's shim.
