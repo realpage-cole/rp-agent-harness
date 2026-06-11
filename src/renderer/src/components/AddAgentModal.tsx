@@ -16,6 +16,7 @@ import {
   providerPreset,
   isClaudeProvider
 } from '@/store/config';
+import { spawnPtyForTeam } from '@/ipc/teams';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
 
@@ -160,7 +161,8 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     // Quote-aware so an agy model label like "Gemini 3.1 Pro (High)" — or any
     // auto-mode flags appended to the command — stays one argument.
     const [exe, ...args] = tokenizeCommand(command.trim());
-    const spawnRes = await window.cth.spawnPty({
+    // FE-7: a newly added agent joins the team that's in view.
+    const spawnRes = await spawnPtyForTeam({
       id: ptyId,
       cwd,
       command: exe,
@@ -179,7 +181,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         role: description.trim() || undefined,
         capabilities: selectedPreset?.capabilities ?? prefillCapabilities
       }
-    });
+    }, useStore.getState().activeTeamId);
     if (!spawnRes.ok) {
       setBusy(false);
       setError(spawnRes.error ?? 'spawn failed');

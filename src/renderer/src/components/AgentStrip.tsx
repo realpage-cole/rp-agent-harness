@@ -5,6 +5,7 @@ import { PixelPanel } from './PixelPanel';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
 import { buildSpawnCommand, inferAgentProvider, tokenizeCommand, type HarnessConfig } from '@/store/config';
+import { spawnPtyForTeam } from '@/ipc/teams';
 
 export interface AgentStripProps {
   /** Needed to rebuild a spawn command when a restorable agent predates the
@@ -115,7 +116,8 @@ export function AgentStrip({ config }: AgentStripProps) {
         if (!command || !a.cwd) { useStore.getState().removeRestorableAgent(a.id); continue; }
         const [exe, ...args] = tokenizeCommand(command);
         const ptyId = a.ptyId ?? `pty-${a.id}`;
-        const res = await window.cth.spawnPty({
+        // FE-7: restored workers rejoin the team that's in view.
+        const res = await spawnPtyForTeam({
           id: ptyId,
           cwd: a.cwd,
           command: exe,
@@ -131,7 +133,7 @@ export function AgentStrip({ config }: AgentStripProps) {
           // the old worktree was torn down on exit, so a fresh one is created.
           isolate: !!a.worktreePath,
           hive: { id: a.id, name: a.name, provider, cwd: a.cwd, role: a.description }
-        });
+        }, useStore.getState().activeTeamId);
         if (res.ok) {
           useStore.getState().addAgent({
             ...a,

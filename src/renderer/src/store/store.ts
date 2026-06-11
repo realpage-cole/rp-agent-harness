@@ -169,9 +169,10 @@ interface State {
   /** Replace the known-team list (from `teams:list`). Ensures a slice exists for
    *  every listed team so switching is instant. */
   setTeamList: (list: TeamSummary[]) => void;
-  /** Add/refresh one team (from a `teams:event` create/status). Creates an empty
-   *  slice if the team is new; does not switch to it. */
-  upsertTeam: (summary: TeamSummary) => void;
+  /** Add/refresh one team (from a `teams:event` create/status). Accepts a partial
+   *  so a status-only event (running/agentCount) merges without clobbering name.
+   *  Creates an empty slice if the team is new; does not switch to it. */
+  upsertTeam: (summary: Partial<TeamSummary> & { id: string }) => void;
   /** Drop a team (from a `teams:event` remove). Falls back to the default/first
    *  team if the active one was removed. */
   removeTeam: (teamId: string) => void;
@@ -181,6 +182,18 @@ interface State {
    *  is the active team, the flat mirror is updated too; background teams update
    *  silently. Auto-creates the slice if the team isn't known yet. */
   applyToTeam: (teamId: string, mutate: (slice: TeamSlice) => Partial<TeamSlice>) => void;
+  /** Team-scoped variant of updateAgent — patch one agent in a specific team's
+   *  slice (FE-2: route a teamId-stamped status/hook event to the right team,
+   *  even when that team is off-screen). Mirrors to flat fields iff it's active. */
+  updateAgentIn: (teamId: string, id: string, patch: Partial<Agent>) => void;
+  /** Team-scoped tool-count bump (per-team usage proxy). */
+  bumpToolCountIn: (teamId: string, id: string) => void;
+  /** Team-scoped enqueue — park a message for an agent in a specific team so the
+   *  drain loop delivers it even while that team is in the background. Persists to
+   *  the team's namespaced queue store. */
+  enqueueMessageIn: (teamId: string, agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string } }) => void;
+  /** Team-scoped queued-message removal (used by the drain loop for any team). */
+  removeQueuedMessageIn: (teamId: string, agentId: string, messageId: string) => void;
   agents: Agent[];
   /** Agents whose terminal was closed — retained + flagged, kept off the active
    *  roster/floor. The hive registry retains them durably; this mirrors them for
@@ -567,9 +580,11 @@ export const useStore = create<State>((set) => ({
     }),
   upsertTeam: (summary) =>
     set((s) => {
-      const teamList = s.teamList.some((t) => t.id === summary.id)
+      const exists = s.teamList.some((t) => t.id === summary.id);
+      const teamList = exists
         ? s.teamList.map((t) => (t.id === summary.id ? { ...t, ...summary } : t))
-        : [...s.teamList, summary];
+        // New team: name defaults to its id until a fuller summary arrives.
+        : [...s.teamList, { name: summary.id, ...summary }];
       const teams = s.teams[summary.id]
         ? s.teams
         : { ...s.teams, [summary.id]: loadTeamSlice(summary.id) };
@@ -613,6 +628,36 @@ export const useStore = create<State>((set) => ({
         return { teams, ...mirror };
       }
       return { teams };
+    }),
+  updateAgentIn: (teamId, id, patch) =>
+    useStore.getState().applyToTeam(teamId, (slice) => ({
+      agents: slice.agents.map((a) => (a.id === id ? { ...a, ...patch } : a))
+    })),
+  bumpToolCountIn: (teamId, id) =>
+    useStore.getState().applyToTeam(teamId, (slice) => ({
+      toolCounts: { ...slice.toolCounts, [id]: (slice.toolCounts[id] ?? 0) + 1 }
+    })),
+  enqueueMessageIn: (teamId, agentId, text, meta) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const msg: QueuedMessage = {
+      id: newQueuedId(), text: trimmed, ts: Date.now(),
+      ...(meta?.slack ? { slack: meta.slack } : {})
+    };
+    useStore.getState().applyToTeam(teamId, (slice) => {
+      const messageQueues = { ...slice.messageQueues, [agentId]: [...(slice.messageQueues[agentId] ?? []), msg] };
+      persistQueues(messageQueues, teamId);
+      return { messageQueues };
+    });
+  },
+  removeQueuedMessageIn: (teamId, agentId, messageId) =>
+    useStore.getState().applyToTeam(teamId, (slice) => {
+      const current = slice.messageQueues[agentId];
+      if (!current) return {};
+      const next = current.filter((m) => m.id !== messageId);
+      const messageQueues = { ...slice.messageQueues, [agentId]: next };
+      persistQueues(messageQueues, teamId);
+      return { messageQueues };
     }),
   agents: initialAgents,
   archivedAgents: initialArchivedAgents,
@@ -808,7 +853,18 @@ export function activeSlice(s: State): TeamSlice {
 /** Summary for the active team (id/name/badges), or a default stand-in. */
 export function activeTeam(s: State): TeamSummary {
   return s.teamList.find((t) => t.id === s.activeTeamId)
-    ?? { id: s.activeTeamId, name: s.activeTeamId };
+    ?? { id: s.activeTeamId, name: s.activeTeamId, createdAt: 0, godId: 'god', running: true, agentCount: 0 };
+}
+
+/** Every (teamId, agent) pair across ALL teams — the iteration basis for the
+ *  background-aware loops (god bootstrap, inbox-wake, queue drain). Parallel
+ *  teams stay live, so these loops must service off-screen teams too. */
+export function teamAgentEntries(s: State): Array<{ teamId: string; agent: Agent }> {
+  const out: Array<{ teamId: string; agent: Agent }> = [];
+  for (const [teamId, slice] of Object.entries(s.teams)) {
+    for (const a of slice.agents) out.push({ teamId, agent: a });
+  }
+  return out;
 }
 
 /** Kill an agent's PTY and re-spawn it with the SAME agent id (so its memory,
@@ -847,9 +903,13 @@ export async function respawnAgent(
       : agent.isAssistant
       ? { id: agent.id, name: agent.name, cwd: agent.cwd, provider, isAssistant: true, role: "orchestrator's prep assistant" }
       : { id: agent.id, name: agent.name, cwd: agent.cwd, provider, role: agent.description };
+    // FE-7: a respawn stays in the agent's current (active) team. teamId is added
+    // to the spawn options (cast locally — the preload type gains it at backend
+    // integration; importing the IPC bridge here would create a store↔ipc cycle).
     const res = await window.cth.spawnPty({
-      id: agent.ptyId, cwd: agent.cwd, command: exe, args, provider, cols: 100, rows: 30, hive
-    });
+      id: agent.ptyId, cwd: agent.cwd, command: exe, args, provider, cols: 100, rows: 30, hive,
+      teamId: useStore.getState().activeTeamId
+    } as unknown as Parameters<typeof window.cth.spawnPty>[0]);
     if (res.ok) {
       updateAgent(agent.id, {
         command: command.trim(),

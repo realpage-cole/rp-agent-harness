@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useStore } from '@/store/store';
+import { hiveTasksFor } from '@/ipc/teams';
 
 /** A single task as it appears on the kanban — a slim, defensively-parsed view
  *  of the hive ledger (hive/tasks.json). Mirrors the fields the dashboard needs;
@@ -78,12 +80,15 @@ export function useHiveTasks(pollMs = 5000): UseHiveTasks {
   const [tasks, setTasks] = useState<DashboardTask[]>([]);
   const [loaded, setLoaded] = useState(false);
   const groupedRef = useRef<GroupedTasks>(EMPTY_GROUPS);
+  // FE-2: the kanban shows the in-view team's ledger; re-poll on team switch.
+  const activeTeamId = useStore((s) => s.activeTeamId);
 
   useEffect(() => {
     let cancelled = false;
+    setLoaded(false);
     const poll = async (): Promise<void> => {
       try {
-        const raw = await window.cth.hiveTasks();
+        const raw = await hiveTasksFor(activeTeamId);
         if (cancelled) return;
         setTasks(parseTasks(raw));
         setLoaded(true);
@@ -95,7 +100,7 @@ export function useHiveTasks(pollMs = 5000): UseHiveTasks {
     void poll();
     const handle = setInterval(() => { void poll(); }, pollMs);
     return () => { cancelled = true; clearInterval(handle); };
-  }, [pollMs]);
+  }, [pollMs, activeTeamId]);
 
   groupedRef.current = group(tasks);
   return { tasks, grouped: groupedRef.current, loaded };

@@ -14,6 +14,7 @@ import { MemoryGraphPanel } from './MemoryGraphPanel';
 import { useFleetTelemetry } from '@/hooks/useTelemetry';
 import { COMMAND_GROUPS } from '@shared/claudeCommands';
 import { useStore, type Agent } from '@/store/store';
+import { spawnPtyForTeam } from '@/ipc/teams';
 import { usePtyParser } from '@/hooks/usePtyParser';
 import { buildSpawnCommand, modelsForProvider, tokenizeCommand, inferAgentProvider, isClaudeProvider } from '@/store/config';
 
@@ -241,7 +242,7 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
         : a.isAssistant
         ? { id: a.id, name: a.name, cwd: a.cwd, provider, isAssistant: true, role: "orchestrator's prep assistant" }
         : { id: a.id, name: a.name, cwd: a.cwd, provider, role: a.description };
-      const res = await window.cth.spawnPty({ id: a.ptyId, cwd: a.cwd, command: exe, args, provider, cols: 100, rows: 30, hive });
+      const res = await spawnPtyForTeam({ id: a.ptyId, cwd: a.cwd, command: exe, args, provider, cols: 100, rows: 30, hive }, useStore.getState().activeTeamId);
       if (res.ok) updateAgent(a.id, { command: command.trim(), provider, model, status: 'idle', action: 'restarting…' });
     } catch { /* noop */ } finally {
       setRestarting(null);
