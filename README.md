@@ -1,6 +1,6 @@
 # rp-agent-harness
 
-**A local multi-agent harness for [Claude Code](https://claude.com/claude-code).** `rp-agent-harness` is an internal RealPage desktop app (Electron + React + TypeScript) that turns the `claude` CLI sessions you already run in your terminal into a self-coordinating team. Each agent runs as a real Claude Code process in a pseudo-terminal, gets long-term memory and a mailbox, and is coordinated by a **god orchestrator agent** you talk to. A modern Hive dashboard shows the agent roster, a live activity feed, a task board, and a "needs you" queue for the items that require your input. Everything is local-first; an optional Supabase layer lets teammates share long-term memory and a team blackboard, and view each other's roster + task board read-only.
+**A local multi-agent harness for [Claude Code](https://claude.com/claude-code).** `rp-agent-harness` is an internal RealPage desktop app (Electron + React + TypeScript) that turns the `claude` CLI sessions you already run in your terminal into a self-coordinating team. Each agent runs as a real Claude Code process in a pseudo-terminal, gets long-term memory and a mailbox, and is coordinated by a **god orchestrator agent** you talk to. A modern Hive dashboard shows the agent roster, a live activity feed, a task board, and a "needs you" queue for the items that require your input. You can run **several independent teams in parallel** — each its own orchestrator, hive, telemetry, and dashboard view — and **clone** an existing team's agent lineup into a fresh team with one click. Everything is local-first; an optional Supabase layer lets teammates share long-term memory and a team blackboard, and view each other's roster + task board read-only.
 
 > 🚀 **Just cloned this and want it running?** Start with **[GET-SETUP.md](GET-SETUP.md)** — a guided, copy-paste setup with separate **macOS** and **Windows** tracks (including the one-time RealPage corporate-network cert step). This README is the reference; that's the on-ramp.
 
@@ -16,7 +16,9 @@
 - [Architecture](#architecture)
   - [Three Electron processes](#three-electron-processes)
   - [The Hive — on-disk coordination layer](#the-hive--on-disk-coordination-layer)
+  - [Teams — parallel hives](#teams--parallel-hives)
   - [The orchestrator (god agent) and human-in-the-loop](#the-orchestrator-god-agent-and-human-in-the-loop)
+  - [Per-agent isolation and billing](#per-agent-isolation-and-billing)
   - [Memory](#memory)
 - [The dashboard](#the-dashboard)
 - [Collaborative memory (Supabase)](#collaborative-memory-supabase)
@@ -38,15 +40,18 @@ It is local-first by design: everything runs on your machine and works fully off
 
 - **Multi-agent Claude Code harness.** Every agent is a real `claude` session running in a `node-pty` pseudo-terminal — full read/write/resize/kill, live streaming over IPC, multiple agents at once. Additional providers are supported, including an Antigravity (Gemini) worker and a Codex preset; hookless providers receive hive mail as a terminal work order rather than a full inbox-drain.
 - **Orchestrator + hive coordination.** The on-disk "hive" is a single-committer, git-backed coordination layer: per-agent identity and long-term memory, atomic-file mailboxes (`outbox/` → routed into `inbox/`), a shared blackboard, and an append-only event log. A god orchestrator agent (id `god`, role `orchestrator`) adjudicates traffic, routes and assigns tasks, and parks human-blocking items in a "needs you" queue. No agent ever touches git directly, which avoids `.git/index.lock` corruption.
-- **Modern Hive dashboard.** The main view composes an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" banner, with quick-nav into the Command Center tabs (Tasks, Schedules, Needs you). All bindings — tasks, human queue, messages, agent status — are real, live data.
+- **Multiple teams in parallel (Clone Team).** Run several fully independent hives at once — each with its own god orchestrator, on-disk hive, telemetry, circuit breaker, hook server, and terminals — all live simultaneously, not just one at a time. A **Clone Team** button mirrors an existing team's per-agent configs (roster, providers, prompts, API key) into a brand-new team that starts fresh (empty memory, board, tasks, and inboxes). A **team selector** in the dashboard switches which team you're viewing; the others keep running in the background. The original hive never moves — it stays at `<harnessHome>/hive/` while clones live under `<harnessHome>/teams/<id>/`.
+- **Per-agent tool isolation.** Each worker spawns with its own `CLAUDE_CONFIG_DIR` (`<agentDir>/.cchome`), so its MCP servers, plugins, and Claude Code session state are isolated to that agent and provisioned per-agent rather than shared from your global `~/.claude`. The orchestrator (god) intentionally keeps the shared home for full access.
+- **Modern Hive dashboard.** The main view composes an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" banner, with quick-nav into the Command Center tabs (Tasks, Schedules, Needs you), plus a team selector when more than one team exists. All bindings — tasks, human queue, messages, agent status — are real, live data.
 - **Optional Supabase collaborative sync.** Off by default. When enabled, Supabase becomes a shared "upstream" the local hive never had: an append-only mirror of the event log, cost ledger, and command history; two-way agent-memory sync; a **shared team blackboard**; and **per-owner roster + kanban** — your hive stays your own (your orchestrator only manages your agents), and a unified **Viewing** toggle switches the dashboard to a teammate's roster + board read-only. It runs entirely in the Electron main process and is layered on top of the local hive — local files under `<harnessHome>/hive/` stay the source of truth and the app remains fully functional offline. Backed by Supabase Auth (email/password), Row-Level Security, and workspaces; migrations live in `supabase/migrations/`.
 - **Shared semantic memory (local embeddings).** Long-term agent memory is markdown-first and works on its own. On top of that, durable facts in every agent's `memory.md` are embedded — **locally, via [Ollama](https://ollama.com) (`nomic-embed-text`)**, because RealPage's network policy blocks the usual HuggingFace model downloads — and the vectors are stored in the team's **Supabase `pgvector`** index. The result is one shared semantic memory across teammates, sessions, and projects: search it by meaning from the UI, and the more the team records, the better future sessions get. This is the living/breathing layer of the harness. It degrades silently to a no-op when Ollama isn't running or sync is off (plain markdown memory still works).
-- **Durability and control.** A SQLite-backed durable store (window bounds + history) and a durable cost ledger that survive restarts; a cost/runaway circuit breaker (steer → constrain → stop); per-agent token budgets and real token/cost telemetry read from `~/.claude/projects/` transcripts; live OpenTelemetry-based observability; a memory-condensation reflector; optional per-agent git worktree isolation; recurring scheduled missions (an hourly ops standup ships enabled); GitHub issue/CI ingestion via the `gh` CLI; and desktop notifications.
+- **Durability and control.** A SQLite-backed durable store (window bounds + history) and a durable cost ledger that survive restarts; a cost/runaway circuit breaker (steer → constrain → stop); per-agent token budgets and real token/cost telemetry via a per-team OpenTelemetry collector (with Claude Code transcripts as a fallback source); a memory-condensation reflector; optional per-agent git worktree isolation; recurring scheduled missions (an hourly ops standup ships enabled); GitHub issue/CI ingestion via the `gh` CLI; and desktop notifications.
 
 ## Requirements
 
 - **Node.js** and **npm** (Node 22+ recommended; see the Node 24 note under Install).
 - **[Claude Code](https://claude.com/claude-code)** on your `PATH` so agents can run `claude` (the default command). Any other command works too.
+- An **Anthropic API key** placed at `<harnessHome>/hive/.secrets/anthropic-api-key` (a clone reads its own team's `.secrets/anthropic-api-key`). Every agent — workers and the god orchestrator — is spawned with this key as `ANTHROPIC_API_KEY` so all usage bills the API account; any inherited `CLAUDE_CODE_OAUTH_TOKEN` (the subscription token) is stripped from the spawn env so it can't silently override the key. The file is kept out of git.
 - A **C/C++ toolchain** for the native addons (`node-pty`, `better-sqlite3`). On macOS, install the Xcode Command Line Tools:
   ```bash
   xcode-select --install
@@ -118,13 +123,13 @@ npm run dist:linux # Linux AppImage (x64)
 
 ### Three Electron processes
 
-- **Main (Node).** Owns everything privileged: it spawns each agent as a `node-pty` child and streams its output over per-id IPC, runs the Hive coordination layer (`src/main/hive.ts`), hosts the hook server that agents call back into (`src/main/hooks.ts`), runs the shared semantic-memory layer (local Ollama embeddings in `src/main/memory/ollama.ts`, read/searched via `src/main/memory.ts`), and drives the optional Supabase sync (`src/main/sync/*`).
+- **Main (Node).** Owns everything privileged: it spawns each agent as a `node-pty` child and streams its output over per-id IPC, runs the Hive coordination layer (`src/main/hive.ts`), hosts the hook server that agents call back into (`src/main/hooks.ts`), runs the shared semantic-memory layer (local Ollama embeddings in `src/main/memory/ollama.ts`, read/searched via `src/main/memory.ts`), and drives the optional Supabase sync (`src/main/sync/*`). All of this is bundled per team into a `TeamRuntime` (`src/main/teamRuntime.ts`) — one `HiveManager` plus its own hook server, telemetry collector, circuit breaker, control registry, reflector, and sync manager — and the process holds a `Map<teamId, TeamRuntime>` so any number of teams run side by side (see [Teams](#teams--parallel-hives)).
 - **Preload.** A thin `contextBridge` that exposes a single typed `window.cth` API to the renderer (`src/preload/index.ts`). The renderer never touches Node, IPC channels, the filesystem, or git directly — only this bridge.
 - **Renderer (React).** The modern **Hive dashboard** (`src/renderer/src/components/dashboard/*`): an agent roster, a live activity feed, a dependency-aware kanban task board, and a "needs you" queue for items waiting on a human. It also hosts the per-agent terminals (xterm.js over the PTY bytes). It is a pure view over state the main process owns.
 
 ### The Hive — on-disk coordination layer
 
-Everything the team knows is plain files in one local git repo under `<harnessHome>/hive/`. Two rules make this safe under many concurrent agents:
+Everything a team knows is plain files in one local git repo. The default team's hive lives under `<harnessHome>/hive/`; each cloned team gets its own independent git-backed hive under `<harnessHome>/teams/<id>/hive/` with the identical layout (see [Teams](#teams--parallel-hives)). Two rules make this safe under many concurrent agents:
 
 - **Single committer.** Only the Electron main process ever runs git (commit with retry/backoff and stale-lock recovery). Agents never call git — they just read and write files. This avoids `.git/index.lock` corruption.
 - **Single-writer-per-file.** Each agent writes only inside its own `agents/<id>/` directory. Cross-agent delivery is done by the **router** (in the main process), which moves messages out of a sender's `outbox/` and into the recipient's `inbox/`. No file is ever written by two processes.
@@ -152,6 +157,18 @@ Each message is one JSON file written via temp-file + atomic rename, never a co-
 
 **The router** polls every `outbox/` (cheap and robust versus `fs.watch`, default ~1.5s), normalizes each message, delivers it to the recipient's `inbox/`, appends to `log.jsonl`, and commits — all in the main process. Messages addressed to `"god"`, `"broadcast"`, or `"human"` are resolved here (a `"human"` message routes to the orchestrator, the human's proxy on the team). A hop cap stops two agents from ping-ponging forever.
 
+### Teams — parallel hives
+
+A **team** is one complete, self-contained hive: its own roster, god orchestrator, on-disk files, and services. The harness can run **many teams at once**, all live — switching teams in the UI only changes what you're *viewing*, it never pauses the others.
+
+- **TeamRuntime.** Each team is a `TeamRuntime` (`src/main/teamRuntime.ts`) bundling a `HiveManager` plus a dedicated hook server, telemetry collector, circuit breaker, control registry, memory reflector, thoughts service, and sync manager. The main process keeps a `Map<teamId, TeamRuntime>` (`src/main/index.ts`) and routes every spawn/query/event to the right runtime; the default team is `'default'`.
+- **On-disk layout (no-move).** The default team is the legacy hive at `<harnessHome>/hive/` — it is **never relocated**. Each cloned team lives at `<harnessHome>/teams/<id>/hive/`, an independent git repo with the same layout. Feeding each `HiveManager` a team-scoped home means every root-relative path (registry, board, tasks, log, `.secrets`, hook socket) becomes team-correct automatically.
+- **One god per team.** Every team boots its own orchestrator on a deterministic PTY id (the default team keeps `pty-god`; others use `pty-<teamId>-god`), so each team self-coordinates in parallel. Closing the app shuts every team's god down cleanly.
+- **Clone Team.** Cloning copies the source team's per-agent configs — id, name, provider, role, capabilities, working dir, custom prompt — and its `anthropic-api-key`, then **starts fresh**: each agent gets a new empty `memory.md`, and the new team gets a fresh `board.md`, empty `tasks.json`, empty inboxes, a fresh `git init`, and its own `syncWorkspaceId`. No live state, history, or in-flight messages carry over. If any step fails the partially-created team is rolled back. Exposed over IPC as `teams:list` / `teams:clone` with a `teams:event` push channel; team **removal** is not yet in the UI.
+- **Per-team isolation.** Each team's telemetry collector binds its own ephemeral loopback port (OS-assigned, so teams never clash), and per-agent OTEL endpoints point at the owning team's collector. Module maps that key by agent id (circuit breaker, control registry, hook transcript paths) live *inside* the `TeamRuntime`, so agents in different teams can't collide.
+- **Event stamping.** Every per-team push event to the renderer is stamped with its `teamId`, and the renderer keeps a separate store slice per team — so off-screen teams keep updating their own slice while you watch another.
+- **Inbound routing.** The optional Slack and webhook ingress are single global listeners; inbound messages always route to the **default team's** god. Clones are driven from the UI, not from external ingress.
+
 ### The orchestrator (god agent) and human-in-the-loop
 
 One always-on privileged agent is the **orchestrator**, also called the **god agent** (its id is `god`, flagged `isGod` in the registry). It is an ordinary agent process — the intelligence — that owns the team-level work:
@@ -164,6 +181,13 @@ One always-on privileged agent is the **orchestrator**, also called the **god ag
 There is **no separate approval queue**. Human-in-the-loop is native to each agent's own Claude Code session: tool-permission prompts are the gate, and they can be approved remotely (e.g. from a phone via `/remote-control`). When a task can only proceed with a human's input — a question or an action only a person can take — the orchestrator marks the card `blocked` and appends the ask to the card's `humanQA` array; the dashboard surfaces these in the **needs you** queue, and the answer flows back both onto the card and as an inbox message to the orchestrator.
 
 Autonomy comes from a `Stop` hook: when an agent finishes a turn, the hook checks its inbox via the main process and, if there are unread messages, returns `{"decision":"block", …}` to keep the agent working (guarded against infinite loops by `stop_hook_active` and the per-agent cursor).
+
+### Per-agent isolation and billing
+
+When the main process spawns an agent (`ensureAgent` in `src/main/hive.ts`), it shapes the child's environment:
+
+- **Tool isolation (workers).** Each non-god agent is given its own `CLAUDE_CONFIG_DIR` at `<agentDir>/.cchome`, seeded once with onboarding + workspace-trust accepted so a fresh home never prompts. This scopes that agent's MCP servers, plugins, and Claude Code session state to itself — provisioned per agent (`hive/agent-tooling.json` + `hive/bin/provision_agent_tools.py`) rather than inherited from your global `~/.claude`. The **god** orchestrator intentionally keeps the shared home for full access.
+- **Billing via API key.** Every agent — workers *and* god — is spawned with `ANTHROPIC_API_KEY` read from `<root>/.secrets/anthropic-api-key` (the owning team's hive root), so all usage bills the API account. Any inherited `CLAUDE_CODE_OAUTH_TOKEN` is deleted from the spawn env, because a lingering subscription OAuth token would override the API key and silently bill the subscription instead. The secret file is kept out of git.
 
 ### Memory
 
@@ -179,7 +203,11 @@ The main pane is a modern **Hive dashboard**. It composes four live, real-data p
 - **Activity feed** (right) — routed hive messages newest-first ("X asked Y", "X informed the team", etc.), rendered from the live message stream; human escalations are highlighted and framed toward "… You".
 - **Needs-you banner** (top) — appears only when the orchestrator has parked one or more questions for the human; it shows the count and an **Answer →** button into the Command Center's **human** tab.
 
-A header row provides quick-nav buttons (**Tasks**, **Schedules**, **Needs you**) into the **Command Center** tabs — the per-agent control surface for tasks, scheduled missions, and the human-in-the-loop queue. It also has a **Viewing** selector: it shows *your* hive by default, but switch it to a teammate and the **roster + task board both flip to that teammate's, read-only** (your local board is never touched). The blackboard (Command Center → **activity**) stays the one shared team board.
+A header row provides quick-nav buttons (**Tasks**, **Schedules**, **Needs you**) into the **Command Center** tabs — the per-agent control surface for tasks, scheduled missions, and the human-in-the-loop queue.
+
+When you're running more than one **team** (see [Teams](#teams--parallel-hives)), a **team selector** appears: it switches which team's roster, board, feed, and terminals the dashboard shows, while every other team keeps running in the background. A **Clone Team** action mirrors the current team's agent lineup into a fresh team and switches you to it. (This is distinct from the Supabase **Viewing** toggle below, which is about teammates' hives, not your local teams.)
+
+The header also has a **Viewing** selector: it shows *your* hive by default, but switch it to a teammate and the **roster + task board both flip to that teammate's, read-only** (your local board is never touched). The blackboard (Command Center → **activity**) stays the one shared team board.
 
 ## Collaborative memory (Supabase)
 
@@ -246,7 +274,7 @@ As an internal RealPage project, this follows RealPage's standard code of conduc
 
 ### Security
 
-`rp-agent-harness` is a local-first desktop app. It spawns local processes in PTYs and reads/writes files only under directories you register, sandboxed and path-validated in the main process. The renderer has no direct Node access (`nodeIntegration: false`, `contextIsolation: true`); all `fs:*` / `git:*` IPC is typed through a `contextBridge` (`window.cth`) and rooted at an agent's working directory. The hive commits to a local git repo from a single committer (the main process); agents only write plain files. The only network listener is a local socket (or named pipe on Windows) for the hook server.
+`rp-agent-harness` is a local-first desktop app. It spawns local processes in PTYs and reads/writes files only under directories you register, sandboxed and path-validated in the main process. The renderer has no direct Node access (`nodeIntegration: false`, `contextIsolation: true`); all `fs:*` / `git:*` IPC is typed through a `contextBridge` (`window.cth`) and rooted at an agent's working directory. The hive commits to a local git repo from a single committer (the main process); agents only write plain files. The only network listeners are local: a per-team socket (or named pipe on Windows) for the hook server, and each team's telemetry collector on an ephemeral **loopback-only** (`127.0.0.1`) port. The optional Slack/webhook ingress is opt-in and off by default.
 
 When optional Supabase collaborative sync is enabled, Supabase Auth tokens live **only** in the main process (never crossing IPC to the renderer), and workspace access is enforced server-side with Row-Level Security — a client only sees rows for workspaces it belongs to.
 
