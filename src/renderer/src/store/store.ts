@@ -118,7 +118,69 @@ export interface AddAgentPrefill {
  *  don't see the "add agent" prompt before the orchestrator has started. */
 export type GodStatus = 'booting' | 'ready' | 'failed';
 
+/** The legacy/default team id. Existing single-hive installs are this team; its
+ *  on-disk hive + localStorage keys keep their pre-multi-team names so nothing
+ *  regresses. Mirrors the main-process default team (architect findings §2). */
+export const DEFAULT_TEAM_ID = 'default';
+
+/** A team as listed for the TeamSelector. Mirrors the `teams:list` IPC shape
+ *  (findings §6.1) — fields beyond id/name are best-effort and arrive from the
+ *  main process (FE-2 / BE-7); until then a team is just {id, name}. */
+export interface TeamSummary {
+  id: string;
+  name: string;
+  createdAt?: number;
+  godId?: string;
+  /** runtime is live in the main process (parallel teams are always running) */
+  running?: boolean;
+  /** active (non-archived) agent count, for the selector badge */
+  agentCount?: number;
+}
+
+/** All per-team renderer state. Today's single-hive fields, now keyed by team.
+ *  One slice per team in `State.teams`; the slice for `activeTeamId` is mirrored
+ *  onto the top-level State fields so existing components (which read `s.agents`,
+ *  `s.godStatus`, …) keep working unchanged and always see the active team. */
+export interface TeamSlice {
+  agents: Agent[];
+  archivedAgents: Agent[];
+  restorableAgents: Agent[];
+  selectedId: string | null;
+  feeds: Record<string, string[]>;
+  messageQueues: Record<string, QueuedMessage[]>;
+  toolCounts: Record<string, number>;
+  drafts: Record<string, string>;
+  answerDrafts: Record<string, string>;
+  godStatus: GodStatus;
+}
+
 interface State {
+  /** Per-team state slices, keyed by teamId. Source of truth for per-team data.
+   *  The active team's slice is mirrored onto the flat fields below. */
+  teams: Record<string, TeamSlice>;
+  /** Which team is in view. Its slice drives the mirrored flat fields. */
+  activeTeamId: string;
+  /** All known teams (for the TeamSelector). Distinct from `viewedOwner`, which
+   *  is read-only Supabase teammate viewing. */
+  teamList: TeamSummary[];
+  /** Switch the in-view team: re-mirror its slice onto the flat fields. NEVER
+   *  stops/unmounts other teams — they stay live in the main process (§7.7). */
+  setActiveTeam: (teamId: string) => void;
+  /** Replace the known-team list (from `teams:list`). Ensures a slice exists for
+   *  every listed team so switching is instant. */
+  setTeamList: (list: TeamSummary[]) => void;
+  /** Add/refresh one team (from a `teams:event` create/status). Creates an empty
+   *  slice if the team is new; does not switch to it. */
+  upsertTeam: (summary: TeamSummary) => void;
+  /** Drop a team (from a `teams:event` remove). Falls back to the default/first
+   *  team if the active one was removed. */
+  removeTeam: (teamId: string) => void;
+  /** Route a per-team mutation into the right slice — the primitive FE-2 uses to
+   *  demux `teamId`-stamped push events (findings §6.3). `mutate` receives the
+   *  target team's current slice and returns the fields to change. If the target
+   *  is the active team, the flat mirror is updated too; background teams update
+   *  silently. Auto-creates the slice if the team isn't known yet. */
+  applyToTeam: (teamId: string, mutate: (slice: TeamSlice) => Partial<TeamSlice>) => void;
   agents: Agent[];
   /** Agents whose terminal was closed — retained + flagged, kept off the active
    *  roster/floor. The hive registry retains them durably; this mirrors them for
@@ -221,26 +283,36 @@ const LS_ARCHIVED = 'cth.archivedAgents';
 const LS_RESTORABLE = 'cth.restorableAgents';
 const LS_SELECTED = 'cth.selectedId';
 const LS_QUEUES = 'cth.messageQueues';
+const LS_ACTIVE_TEAM = 'cth.activeTeamId';
+
+// Per-team localStorage namespacing. The default team keeps the legacy key names
+// (so existing single-hive installs reload their agents); other teams suffix the
+// team id. Persistence operates on whichever team is active — `activePersistTeam`
+// tracks it so the persist/load helpers (which run outside the store) stay simple.
+let activePersistTeam = DEFAULT_TEAM_ID;
+function pkey(base: string, teamId: string = activePersistTeam): string {
+  return teamId === DEFAULT_TEAM_ID ? base : `${base}.${teamId}`;
+}
 
 // Fields that are large or transient — not worth persisting across reloads.
 // contextTokens/contextLimit describe a LIVE session; persisting them showed a
 // dead session's context gauge after a restart until the poll caught up.
 type PersistedAgent = Omit<Agent, 'recentAssistantText' | 'recentTextTs' | 'blockReason' | 'contextTokens' | 'contextLimit'>;
 
-function persistAgents(agents: Agent[], selectedId: string | null): void {
+function persistAgents(agents: Agent[], selectedId: string | null, teamId: string = activePersistTeam): void {
   try {
     const slim: PersistedAgent[] = agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, ...rest }) => {
       void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit;
       return rest;
     });
-    window.localStorage.setItem(LS_AGENTS, JSON.stringify(slim));
-    window.localStorage.setItem(LS_SELECTED, selectedId ?? '');
+    window.localStorage.setItem(pkey(LS_AGENTS, teamId), JSON.stringify(slim));
+    window.localStorage.setItem(pkey(LS_SELECTED, teamId), selectedId ?? '');
   } catch { /* noop */ }
 }
 
-function loadPersistedAgents(): Agent[] {
+function loadPersistedAgents(teamId: string = activePersistTeam): Agent[] {
   try {
-    const raw = window.localStorage.getItem(LS_AGENTS);
+    const raw = window.localStorage.getItem(pkey(LS_AGENTS, teamId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedAgent[];
     if (!Array.isArray(parsed)) return [];
@@ -259,19 +331,19 @@ function loadPersistedAgents(): Agent[] {
   }
 }
 
-function persistArchived(archived: Agent[]): void {
+function persistArchived(archived: Agent[], teamId: string = activePersistTeam): void {
   try {
     const slim: PersistedAgent[] = archived.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, ...rest }) => {
       void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit;
       return rest;
     });
-    window.localStorage.setItem(LS_ARCHIVED, JSON.stringify(slim));
+    window.localStorage.setItem(pkey(LS_ARCHIVED, teamId), JSON.stringify(slim));
   } catch { /* noop */ }
 }
 
-function loadPersistedArchived(): Agent[] {
+function loadPersistedArchived(teamId: string = activePersistTeam): Agent[] {
   try {
-    const raw = window.localStorage.getItem(LS_ARCHIVED);
+    const raw = window.localStorage.getItem(pkey(LS_ARCHIVED, teamId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedAgent[];
     if (!Array.isArray(parsed)) return [];
@@ -289,19 +361,19 @@ function loadPersistedArchived(): Agent[] {
   }
 }
 
-function persistRestorable(restorable: Agent[]): void {
+function persistRestorable(restorable: Agent[], teamId: string = activePersistTeam): void {
   try {
     const slim: PersistedAgent[] = restorable.map(({ recentAssistantText, recentTextTs, blockReason, ...rest }) => {
       void recentAssistantText; void recentTextTs; void blockReason;
       return rest;
     });
-    window.localStorage.setItem(LS_RESTORABLE, JSON.stringify(slim));
+    window.localStorage.setItem(pkey(LS_RESTORABLE, teamId), JSON.stringify(slim));
   } catch { /* noop */ }
 }
 
-function loadPersistedRestorable(): Agent[] {
+function loadPersistedRestorable(teamId: string = activePersistTeam): Agent[] {
   try {
-    const raw = window.localStorage.getItem(LS_RESTORABLE);
+    const raw = window.localStorage.getItem(pkey(LS_RESTORABLE, teamId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedAgent[];
     if (!Array.isArray(parsed)) return [];
@@ -317,18 +389,18 @@ function loadPersistedRestorable(): Agent[] {
   }
 }
 
-function persistQueues(queues: Record<string, QueuedMessage[]>): void {
+function persistQueues(queues: Record<string, QueuedMessage[]>, teamId: string = activePersistTeam): void {
   try {
     // Only keep non-empty queues so the key stays small.
     const slim: Record<string, QueuedMessage[]> = {};
     for (const [id, q] of Object.entries(queues)) if (q.length) slim[id] = q;
-    window.localStorage.setItem(LS_QUEUES, JSON.stringify(slim));
+    window.localStorage.setItem(pkey(LS_QUEUES, teamId), JSON.stringify(slim));
   } catch { /* noop */ }
 }
 
-function loadPersistedQueues(): Record<string, QueuedMessage[]> {
+function loadPersistedQueues(teamId: string = activePersistTeam): Record<string, QueuedMessage[]> {
   try {
-    const raw = window.localStorage.getItem(LS_QUEUES);
+    const raw = window.localStorage.getItem(pkey(LS_QUEUES, teamId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, QueuedMessage[]>;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -345,9 +417,9 @@ function loadPersistedQueues(): Record<string, QueuedMessage[]> {
   }
 }
 
-function loadPersistedSelectedId(agents: Agent[]): string | null {
+function loadPersistedSelectedId(agents: Agent[], teamId: string = activePersistTeam): string | null {
   try {
-    const id = window.localStorage.getItem(LS_SELECTED);
+    const id = window.localStorage.getItem(pkey(LS_SELECTED, teamId));
     return id && agents.some((a) => a.id === id) ? id : (agents[0]?.id ?? null);
   } catch {
     return agents[0]?.id ?? null;
@@ -369,11 +441,59 @@ const initialSidebarTab: SidebarTab = (() => {
   return 'terminal';
 })();
 
-const initialAgents = loadPersistedAgents();
-const initialArchivedAgents = loadPersistedArchived();
-const initialRestorableAgents = loadPersistedRestorable();
-const initialSelectedId = loadPersistedSelectedId(initialAgents);
-const initialQueues = loadPersistedQueues();
+/** An empty per-team slice — for a team we know of but haven't loaded/populated. */
+function emptySlice(): TeamSlice {
+  return {
+    agents: [], archivedAgents: [], restorableAgents: [], selectedId: null,
+    feeds: {}, messageQueues: {}, toolCounts: {}, drafts: {}, answerDrafts: {},
+    godStatus: 'booting'
+  };
+}
+
+/** Hydrate a team's slice from its (namespaced) localStorage. toolCounts/drafts/
+ *  answerDrafts/godStatus are session-volatile and start fresh, mirroring the
+ *  pre-multi-team behavior where only agents/archived/restorable/queues persisted. */
+function loadTeamSlice(teamId: string): TeamSlice {
+  const agents = loadPersistedAgents(teamId);
+  return {
+    agents,
+    archivedAgents: loadPersistedArchived(teamId),
+    restorableAgents: loadPersistedRestorable(teamId),
+    selectedId: loadPersistedSelectedId(agents, teamId),
+    feeds: {},
+    messageQueues: loadPersistedQueues(teamId),
+    toolCounts: {},
+    drafts: {},
+    answerDrafts: {},
+    godStatus: 'booting'
+  };
+}
+
+// Boot active team: restore the last-viewed team if persisted, else the default.
+// Set `activePersistTeam` first so the legacy initial* loads below resolve the
+// correct (namespaced) keys.
+const initialActiveTeamId = (() => {
+  try { return window.localStorage.getItem(LS_ACTIVE_TEAM) || DEFAULT_TEAM_ID; }
+  catch { return DEFAULT_TEAM_ID; }
+})();
+activePersistTeam = initialActiveTeamId;
+
+const initialActiveSlice = loadTeamSlice(initialActiveTeamId);
+const initialAgents = initialActiveSlice.agents;
+const initialArchivedAgents = initialActiveSlice.archivedAgents;
+const initialRestorableAgents = initialActiveSlice.restorableAgents;
+const initialSelectedId = initialActiveSlice.selectedId;
+const initialQueues = initialActiveSlice.messageQueues;
+
+// Until the main process reports the full list (FE-2 / `teams:list`), we know of
+// the default team plus the restored active team. Slices map starts with the
+// active team's hydrated slice; the default gets an empty slice if distinct.
+const initialTeams: Record<string, TeamSlice> = { [initialActiveTeamId]: initialActiveSlice };
+if (!initialTeams[DEFAULT_TEAM_ID]) initialTeams[DEFAULT_TEAM_ID] = emptySlice();
+const initialTeamList: TeamSummary[] = [
+  { id: DEFAULT_TEAM_ID, name: 'Default' },
+  ...(initialActiveTeamId !== DEFAULT_TEAM_ID ? [{ id: initialActiveTeamId, name: initialActiveTeamId }] : [])
+];
 
 let queuedSeq = 0;
 /** Process-unique id for a queued message (timestamp + counter avoids collisions
@@ -383,7 +503,117 @@ function newQueuedId(): string {
   return `q-${Date.now()}-${queuedSeq}`;
 }
 
+/** The per-team-slice field names. Used to mirror flat-field writes into the
+ *  active team's slice (see `withActive`). */
+const SLICE_KEYS = [
+  'agents', 'archivedAgents', 'restorableAgents', 'selectedId', 'feeds',
+  'messageQueues', 'toolCounts', 'drafts', 'answerDrafts', 'godStatus'
+] as const;
+
+/** Wrap a flat-field state update so the active team's slice is kept in sync.
+ *  Existing actions write the top-level fields (the mirror); this also folds the
+ *  slice-relevant keys of that patch into `teams[activeTeamId]`, so the slice and
+ *  its mirror never drift. Non-slice keys in the patch (e.g. addAgentOpen) pass
+ *  straight through. Use for every action that mutates per-team data. */
+function withActive(s: State, patch: Partial<State>): Partial<State> {
+  const slicePatch: Partial<TeamSlice> = {};
+  for (const k of SLICE_KEYS) {
+    if (k in patch) (slicePatch as Record<string, unknown>)[k] = (patch as Record<string, unknown>)[k];
+  }
+  const active = s.teams[s.activeTeamId] ?? emptySlice();
+  return {
+    ...patch,
+    teams: { ...s.teams, [s.activeTeamId]: { ...active, ...slicePatch } }
+  };
+}
+
 export const useStore = create<State>((set) => ({
+  teams: initialTeams,
+  activeTeamId: initialActiveTeamId,
+  teamList: initialTeamList,
+  setActiveTeam: (teamId) =>
+    set((s) => {
+      if (teamId === s.activeTeamId) return s;
+      const slice = s.teams[teamId] ?? loadTeamSlice(teamId);
+      // Switch which team localStorage writes target, and remember the choice.
+      activePersistTeam = teamId;
+      try { window.localStorage.setItem(LS_ACTIVE_TEAM, teamId); } catch { /* noop */ }
+      // Re-mirror the target slice onto the flat fields; ensure its slice exists.
+      return {
+        activeTeamId: teamId,
+        teams: s.teams[teamId] ? s.teams : { ...s.teams, [teamId]: slice },
+        agents: slice.agents,
+        archivedAgents: slice.archivedAgents,
+        restorableAgents: slice.restorableAgents,
+        selectedId: slice.selectedId,
+        feeds: slice.feeds,
+        messageQueues: slice.messageQueues,
+        toolCounts: slice.toolCounts,
+        drafts: slice.drafts,
+        answerDrafts: slice.answerDrafts,
+        godStatus: slice.godStatus
+      };
+    }),
+  setTeamList: (list) =>
+    set((s) => {
+      const teams = { ...s.teams };
+      for (const t of list) if (!teams[t.id]) teams[t.id] = loadTeamSlice(t.id);
+      // Keep the active team valid if it vanished from the list.
+      const activeTeamId = list.some((t) => t.id === s.activeTeamId)
+        ? s.activeTeamId
+        : (list[0]?.id ?? DEFAULT_TEAM_ID);
+      if (!teams[activeTeamId]) teams[activeTeamId] = emptySlice();
+      return { teamList: list, teams, activeTeamId };
+    }),
+  upsertTeam: (summary) =>
+    set((s) => {
+      const teamList = s.teamList.some((t) => t.id === summary.id)
+        ? s.teamList.map((t) => (t.id === summary.id ? { ...t, ...summary } : t))
+        : [...s.teamList, summary];
+      const teams = s.teams[summary.id]
+        ? s.teams
+        : { ...s.teams, [summary.id]: loadTeamSlice(summary.id) };
+      return { teamList, teams };
+    }),
+  removeTeam: (teamId) =>
+    set((s) => {
+      if (teamId === DEFAULT_TEAM_ID) return s; // never drop the default team
+      const teamList = s.teamList.filter((t) => t.id !== teamId);
+      const { [teamId]: _gone, ...teams } = s.teams;
+      void _gone;
+      if (s.activeTeamId !== teamId) return { teamList, teams };
+      // Active team removed — fall back to default/first and re-mirror.
+      const nextId = teams[DEFAULT_TEAM_ID] ? DEFAULT_TEAM_ID : (teamList[0]?.id ?? DEFAULT_TEAM_ID);
+      const slice = teams[nextId] ?? emptySlice();
+      activePersistTeam = nextId;
+      try { window.localStorage.setItem(LS_ACTIVE_TEAM, nextId); } catch { /* noop */ }
+      return {
+        teamList, teams: teams[nextId] ? teams : { ...teams, [nextId]: slice },
+        activeTeamId: nextId,
+        agents: slice.agents, archivedAgents: slice.archivedAgents,
+        restorableAgents: slice.restorableAgents, selectedId: slice.selectedId,
+        feeds: slice.feeds, messageQueues: slice.messageQueues,
+        toolCounts: slice.toolCounts, drafts: slice.drafts,
+        answerDrafts: slice.answerDrafts, godStatus: slice.godStatus
+      };
+    }),
+  applyToTeam: (teamId, mutate) =>
+    set((s) => {
+      const slice = s.teams[teamId] ?? emptySlice();
+      const slicePatch = mutate(slice);
+      const nextSlice = { ...slice, ...slicePatch };
+      const teams = { ...s.teams, [teamId]: nextSlice };
+      // If the mutated team is in view, mirror the changed fields onto the flat
+      // fields too so subscribed components re-render.
+      if (teamId === s.activeTeamId) {
+        const mirror: Partial<State> = {};
+        for (const k of SLICE_KEYS) {
+          if (k in slicePatch) (mirror as Record<string, unknown>)[k] = (slicePatch as Record<string, unknown>)[k];
+        }
+        return { teams, ...mirror };
+      }
+      return { teams };
+    }),
   agents: initialAgents,
   archivedAgents: initialArchivedAgents,
   restorableAgents: initialRestorableAgents,
@@ -412,13 +642,13 @@ export const useStore = create<State>((set) => ({
   messageQueues: initialQueues,
   toolCounts: {},
   bumpToolCount: (id) =>
-    set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
-  setGodStatus: (status) => set({ godStatus: status }),
-  select: (id) => set((s) => { persistAgents(s.agents, id); return { selectedId: id }; }),
+    set((s) => withActive(s, { toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
+  setGodStatus: (status) => set((s) => withActive(s, { godStatus: status })),
+  select: (id) => set((s) => { persistAgents(s.agents, id); return withActive(s, { selectedId: id }); }),
   updateAgent: (id, patch) =>
-    set((s) => ({ agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),
+    set((s) => withActive(s, { agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),
   pushFeed: (id, line) =>
-    set((s) => ({ feeds: { ...s.feeds, [id]: [...(s.feeds[id] ?? []), line] } })),
+    set((s) => withActive(s, { feeds: { ...s.feeds, [id]: [...(s.feeds[id] ?? []), line] } })),
   addAgent: (agent) =>
     set((s) => {
       const agents = [...s.agents, agent];
@@ -429,13 +659,13 @@ export const useStore = create<State>((set) => ({
       persistAgents(agents, agent.id);
       persistArchived(archivedAgents);
       if (restorableAgents.length !== s.restorableAgents.length) persistRestorable(restorableAgents);
-      return {
+      return withActive(s, {
         agents,
         archivedAgents,
         restorableAgents,
         selectedId: agent.id,
         feeds: { ...s.feeds, [agent.id]: s.feeds[agent.id] ?? [] }
-      };
+      });
     }),
   removeAgent: (id) =>
     set((s) => {
@@ -445,7 +675,7 @@ export const useStore = create<State>((set) => ({
       const selectedId = s.selectedId === id ? (agents[0]?.id ?? null) : s.selectedId;
       persistAgents(agents, selectedId);
       if (_queueGone) persistQueues(messageQueues);
-      return { agents, feeds, selectedId, messageQueues };
+      return withActive(s, { agents, feeds, selectedId, messageQueues });
     }),
   archiveAgent: (id) =>
     set((s) => {
@@ -469,21 +699,21 @@ export const useStore = create<State>((set) => ({
       persistAgents(agents, selectedId);
       persistArchived(archivedAgents);
       if (_queueGone) persistQueues(messageQueues);
-      return { agents, archivedAgents, feeds, selectedId, messageQueues };
+      return withActive(s, { agents, archivedAgents, feeds, selectedId, messageQueues });
     }),
   removeArchivedAgent: (id) =>
     set((s) => {
       if (!s.archivedAgents.some((a) => a.id === id)) return s;
       const archivedAgents = s.archivedAgents.filter((a) => a.id !== id);
       persistArchived(archivedAgents);
-      return { archivedAgents };
+      return withActive(s, { archivedAgents });
     }),
   removeRestorableAgent: (id) =>
     set((s) => {
       if (!s.restorableAgents.some((a) => a.id === id)) return s;
       const restorableAgents = s.restorableAgents.filter((a) => a.id !== id);
       persistRestorable(restorableAgents);
-      return { restorableAgents };
+      return withActive(s, { restorableAgents });
     }),
   taskDetailId: null,
   openTaskDetail: (id) => set({ taskDetailId: id }),
@@ -493,10 +723,10 @@ export const useStore = create<State>((set) => ({
     set((s) => ({ dispatchSeedRequest: { text, seq: (s.dispatchSeedRequest?.seq ?? 0) + 1 } })),
   answerDrafts: {},
   setAnswerDraft: (taskId, text) =>
-    set((s) => ({ answerDrafts: { ...s.answerDrafts, [taskId]: text } })),
+    set((s) => withActive(s, { answerDrafts: { ...s.answerDrafts, [taskId]: text } })),
   drafts: {},
   setDraft: (agentId, text) =>
-    set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
+    set((s) => withActive(s, { drafts: { ...s.drafts, [agentId]: text } })),
   enqueueMessage: (agentId, text, meta) =>
     set((s) => {
       const trimmed = text.trim();
@@ -507,7 +737,7 @@ export const useStore = create<State>((set) => ({
       };
       const messageQueues = { ...s.messageQueues, [agentId]: [...(s.messageQueues[agentId] ?? []), msg] };
       persistQueues(messageQueues);
-      return { messageQueues };
+      return withActive(s, { messageQueues });
     }),
   removeQueuedMessage: (agentId, messageId) =>
     set((s) => {
@@ -516,14 +746,14 @@ export const useStore = create<State>((set) => ({
       const next = current.filter((m) => m.id !== messageId);
       const messageQueues = { ...s.messageQueues, [agentId]: next };
       persistQueues(messageQueues);
-      return { messageQueues };
+      return withActive(s, { messageQueues });
     }),
   clearQueue: (agentId) =>
     set((s) => {
       if (!s.messageQueues[agentId]?.length) return s;
       const messageQueues = { ...s.messageQueues, [agentId]: [] };
       persistQueues(messageQueues);
-      return { messageQueues };
+      return withActive(s, { messageQueues });
     }),
   reconcileWithLivePtys: (livePtyIds) =>
     set((s) => {
@@ -548,7 +778,7 @@ export const useStore = create<State>((set) => ({
         : (agents[0]?.id ?? null);
       persistAgents(agents, selectedId);
       persistRestorable(restorableAgents);
-      return { agents, feeds, selectedId, restorableAgents };
+      return withActive(s, { agents, feeds, selectedId, restorableAgents });
     }),
   setAddAgentOpen: (open) => set({ addAgentOpen: open }),
   setFullscreen: (id) => set({ fullscreenAgentId: id }),
@@ -566,6 +796,19 @@ export const useStore = create<State>((set) => ({
 
 export function selectedAgent(s: State): Agent | undefined {
   return s.agents.find(a => a.id === s.selectedId);
+}
+
+/** The in-view team's slice. The flat State fields mirror this, but a few callers
+ *  (and FE-2's routing) want the slice object directly. Falls back to an empty
+ *  slice if the active id is somehow unknown. */
+export function activeSlice(s: State): TeamSlice {
+  return s.teams[s.activeTeamId] ?? emptySlice();
+}
+
+/** Summary for the active team (id/name/badges), or a default stand-in. */
+export function activeTeam(s: State): TeamSummary {
+  return s.teamList.find((t) => t.id === s.activeTeamId)
+    ?? { id: s.activeTeamId, name: s.activeTeamId };
 }
 
 /** Kill an agent's PTY and re-spawn it with the SAME agent id (so its memory,

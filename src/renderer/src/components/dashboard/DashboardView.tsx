@@ -6,6 +6,7 @@ import { TaskBoard } from './TaskBoard';
 import { NotepadBoard } from './NotepadBoard';
 import { NeedsYouBanner } from './NeedsYouBanner';
 import { HiveViewSelector } from './HiveViewSelector';
+import { TeamSelector } from './TeamSelector';
 
 /**
  * The main pane: a modern dashboard composing the roster, task board, activity
@@ -33,6 +34,10 @@ export function DashboardView() {
           fontSize: 'var(--cth-text-display-md)',
           color: 'var(--cth-ink-900)'
         }}>HIVE</span>
+        {/* Local team switcher — swaps which of your parallel teams is in view.
+            Distinct from HiveViewSelector (read-only Supabase teammate viewing).
+            Renders nothing until a second team exists. */}
+        <TeamSelector />
         {/* Unified view toggle — switches roster + kanban between your hive and a
             teammate's (read-only) together. */}
         <HiveViewSelector />
