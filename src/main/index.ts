@@ -6,31 +6,28 @@ import { join, resolve, sep } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
   readConfig, writeConfig, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
-  modelForRole, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, type HarnessConfig, type ScheduledMission
+  modelForRole, ensureDefaultTeam, DEFAULT_TEAM_ID,
+  type HarnessConfig, type ScheduledMission
 } from './config';
+import { TeamRuntime } from './teamRuntime';
 import { listDir, readFileText, writeFileText } from './fs';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo,
   addWorktree, removeWorktree
 } from './git';
-import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
-import { HookServer } from './hooks';
-import { CircuitBreaker, type BreakerInput } from './breaker';
-import type { UsageProvider } from './usage';
+import { type AgentMeta, type HiveMessage, type HiveTask } from './hive';
+// HiveManager, HookServer, CircuitBreaker, TelemetryCollector, ControlRegistry,
+// MemoryReflector, ThoughtsService, SyncManager are now constructed inside
+// TeamRuntime (one set per team) — index.ts only borrows the default team's
+// instances via aliases (see the Teams block below).
 import { MemoryManager, type MemorySettings } from './memory';
-import { embed as ollamaEmbed } from './memory/ollama';
-import { MemoryReflector, type ReflectSettings } from './reflect';
-import { ThoughtsService } from './thoughts';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens } from './transcript';
 import { traceDetails } from './traceDetail';
 import { costTotalsFromUsage } from './costTotals';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
-import { SyncManager } from './sync';
 import { WebhookServer, type WebhookInbound, type WebhookTaskStatus } from './webhook';
-import { TelemetryCollector } from './telemetry';
-import { ControlRegistry } from './control';
 import { ClosingTimeController } from './closingTime';
 import {
   inferAgentProvider,
@@ -45,50 +42,9 @@ const ptyManager = new PtyManager();
 /** Live PTY id → its hive agent id, recorded at spawn. The pty:kill handler only
  *  gets the PTY id, so this lets a closed tab archive the right registry agent. */
 const ptyToAgent = new Map<string, string>();
-const hive = new HiveManager(
-  () => readConfig().harnessHome,
-  (channel, payload) => {
-    const wc = liveWebContents();
-    if (!wc) return false;
-    try { wc.send(channel, payload); return true; } catch { return false; }
-  }
-);
-// #7C — operator control state (pause/gate/steer/halt), read by the HookServer
-// when deciding hook returns.
-const control = new ControlRegistry();
-// Stage 7A — the live observability tap. Receives Claude Code's first-party OTel
-// over loopback OTLP/JSON and exposes the locked usage-provider seam. resolveCwd
-// lets the transcript fallback find an agent's cwd from the hive registry.
-const telemetry = new TelemetryCollector({
-  emit: (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } },
-  resolveCwd: (agentId) => hive.registry().agents[agentId]?.cwd ?? null
-});
-// Usage provider (Seam 1) — the INTEGRATION swap: Oscar's telemetry collector (#7)
-// IS the provider, replacing Lane A's interim StubUsageProvider. Same
-// getAgentUsage(agentId) pull seam, so the breaker + cost ledger consumers are
-// untouched; telemetry has a transcript fallback built in, so it works before any
-// live OTel arrives.
-const usageProvider: UsageProvider = telemetry;
-// Circuit breaker (Lane A #6.6b) — the REAL policy (replaces Lane C's interim
-// glue). POLICY only; the heartbeat beat feeds it signals (via usageProvider) +
-// enforces its decisions. Config read live so a settings change applies next beat.
-const breaker = new CircuitBreaker(() => {
-  const c = readConfig();
-  return { ...(c.circuitBreaker ?? {}), costCapUsd: c.costCapUsd, costCapTokens: c.costCapTokens, agentTokenCaps: c.agentTokenCaps };
-});
-// Always-on beats (decoupled from the optional heartbeat): the live fleet snapshot
-// the orchestrator reads + the breaker beat, so guardrails + monitoring work even
-// when the heartbeat mission is disabled (it ships off).
-let fleetTimer: ReturnType<typeof setInterval> | null = null;
-let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
-// Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
-// Jim's one breaker input with no on-branch source (telemetry.onApiError seam).
-telemetry.onApiError((agentId) => breaker.recordError(agentId));
-// HookServer needs BOTH: Oscar's control registry (HITL pause/gate/steer/halt via
-// hook returns) AND Jim's breaker (feed recordToolUse on each PostToolUse).
-const hookServer = new HookServer(hive, () => liveWebContents(), () => readConfig(), control, breaker);
 /** Live semantic-memory settings (Ollama host/model + master toggle), read fresh
- *  so a Settings change applies on the next embed/search without a restart. */
+ *  so a Settings change applies on the next embed/search without a restart. The
+ *  global MemoryManager owns this; each TeamRuntime keeps its own copy for sync. */
 function memorySettings(): MemorySettings {
   const c = readConfig();
   return {
@@ -97,99 +53,50 @@ function memorySettings(): MemorySettings {
     model: c.ollamaEmbedModel ?? 'nomic-embed-text'
   };
 }
-// Shared semantic memory: LOCAL Ollama embeddings + the workspace's Supabase
-// pgvector index. Reads (search/wake-up) go through the SyncManager bridge below;
-// writes (embedding owned agents' memory.md) ride the sync push beat. The store
-// bridge is lazy — `syncManager` is declared just below and only invoked at
-// search time, never during construction.
-const memory = new MemoryManager(memorySettings, {
-  canRun: () => syncManager.canRunMemory(),
-  match: (embedding, k, agent) => syncManager.matchMemoryChunks(embedding, k, agent),
-  recent: (k) => syncManager.recentMemoryChunks(k)
-});
-/** Reads the reflect tunables from config each tick (defaults baked in here so a
- *  pre-existing config.json without the keys still gets sane values). */
-function reflectSettings(): ReflectSettings {
-  const c = readConfig();
-  return {
-    enabled: c.reflectEnabled !== false,
-    intervalMs: c.reflectIntervalMs ?? 1_800_000,
-    byteTriggerPct: c.reflectByteTriggerPct ?? 50,
-    sectionTrigger: c.reflectSectionTrigger ?? 50,
-    recentKeep: c.reflectRecentKeep ?? 12,
-    minBytes: c.reflectMinBytes ?? 16_384
-  };
-}
-// Finishes the janitor's missing condense half: bounds each agent's memory.md
-// (Haiku tail-summary, backup→verify→atomic-swap) so it never grows unbounded.
-const reflector = new MemoryReflector(
-  () => readConfig().harnessHome,
-  () => readConfig().defaultCommand ?? 'claude',
-  () => memory.env(),
-  reflectSettings,
-  (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } }
-);
-// Durable harness state (SQLite, main process). Phase A: window bounds (kv) +
-// net-new command history. Opened in whenReady, closed in the teardown blocks.
+// Durable harness state (SQLite, main process) — GLOBAL, shared by every team.
+// Phase A: window bounds (kv) + net-new command history. Opened in whenReady,
+// closed in the teardown blocks.
 const persist = new PersistStore();
-// Supabase collaborative sync (optional, off by default). Pushes the append-only
-// hive sinks + two-way agent memory to a shared workspace so a team shares one
-// logical hive while every machine stays local-first. A complete no-op unless
-// syncEnabled + url/anonKey/workspaceId are all set; the supabase client is a
-// lazily-imported OPTIONAL dep, so the app boots fine without it installed.
-// Config is read fresh each tick so a Settings change applies on the next beat.
-const syncManager = new SyncManager(
-  () => {
-    const c = readConfig();
-    return {
-      enabled: c.syncEnabled === true,
-      url: c.supabaseUrl ?? '',
-      anonKey: c.supabaseAnonKey ?? '',
-      workspaceId: c.syncWorkspaceId ?? ''
-    };
-  },
-  () => readConfig().harnessHome,
+// Forward ref so the global memory bridge can reach the DEFAULT team's sync
+// manager (constructed just below). Closures are lazy → no TDZ at call time.
+let defaultRuntime: TeamRuntime;
+// Shared semantic memory — GLOBAL (one Ollama embedder for the machine). Reads
+// (search/wake-up) bridge into the default team's SyncManager (the local-first
+// surface for memory recall); writes ride that team's sync push beat. The store
+// bridge is lazy — only invoked at search time, never during construction.
+const memory = new MemoryManager(memorySettings, {
+  canRun: () => defaultRuntime.syncManager.canRunMemory(),
+  match: (embedding, k, agent) => defaultRuntime.syncManager.matchMemoryChunks(embedding, k, agent),
+  recent: (k) => defaultRuntime.syncManager.recentMemoryChunks(k)
+});
+
+// ─── Teams (multi-team runtimes) ─────────────────────────────────────────────
+// Each TeamRuntime bundles one team's full service set (HiveManager + hook server
+// + telemetry + breaker + control + reflector + thoughts + sync + the mission
+// scheduler + always-on fleet/breaker beats). Phase 1: exactly one — the legacy
+// 'default' team, whose home resolves to harnessHome (NO-MOVE; root stays
+// <harnessHome>/hive). Phase 2 (cloneTeam) adds more, live in parallel.
+defaultRuntime = new TeamRuntime(DEFAULT_TEAM_ID, {
+  liveWebContents,
+  ptyManager,
+  ptyToAgent,
+  teardownPty,
   persist,
-  {
-    emit: (channel, payload) => {
-      const wc = liveWebContents();
-      if (wc) try { wc.send(channel, payload); } catch { /* window tore down */ }
-    },
-    // Local Ollama embedder for the memory push: chunk + embed each owned agent's
-    // memory.md into the shared `memory_chunks` index. Returns null (no-op, retried)
-    // when semantic memory is off or Ollama is unreachable — never throws.
-    embed: (texts) => {
-      const s = memorySettings();
-      if (!s.enabled) return Promise.resolve(null);
-      return ollamaEmbed(texts, s, 'document');
-    },
-    // Phase 3 — the HiveBridge seam to the hive's shared state. sync/state.ts
-    // stays PURE TRANSPORT (it knows the DB schema, not the hive file shapes);
-    // the HiveManager owns all registry/tasks/board <-> DB shaping + the LWW
-    // merge. readStateRows shapes the local state into DB-column-ready domain
-    // rows for the 60s push; applyStateRows merges remote rows (last-writer-wins,
-    // additive) on realtime/catch-up pull. Both are best-effort inside hive.ts.
-    hive: {
-      readStateRows: () => hive.readStateRows(),
-      pulse: () => hive.pulse(),
-      applyStateRows: (r) => hive.applyStateRows(r)
-    }
-  }
-);
-// Harness-driven author of the Notepad "agent" board: twice a day (11:00 + 15:00
-// America/Chicago) it digests the hive's recent work and appends 1-3 forward-
-// looking ideas via the SyncManager (board='agent', authorKind='agent',
-// agentId='orchestrator'). A no-op unless agentThoughtsEnabled AND sync is on +
-// signed in (the board is shared). Mirrors the reflector's timer-service shape.
-const thoughts = new ThoughtsService(
-  () => readConfig().harnessHome,
-  () => readConfig().defaultCommand ?? 'claude',
-  () => readConfig().agentThoughtsEnabled !== false,
-  () => syncManager.canRunMemory(),
-  (body) => syncManager.appendBoardEntry({
-    board: 'agent', body, authorKind: 'agent', agentId: 'orchestrator'
-  })
-);
+  memoryEnv: () => memory.env()
+});
+const teams = new Map<string, TeamRuntime>([[DEFAULT_TEAM_ID, defaultRuntime]]);
+
+// Back-compat aliases: every IPC handler + helper below still addresses "the"
+// hive/breaker/control/telemetry/etc. These resolve to the DEFAULT team's
+// instances. (BE-7 threads an explicit teamId through the IPC surface; until
+// then the existing single-team callsites keep working unchanged.)
+const hive = defaultRuntime.hive;
+const control = defaultRuntime.control;
+const telemetry = defaultRuntime.telemetry;
+const breaker = defaultRuntime.breaker;
+const hookServer = defaultRuntime.hookServer;
+const reflector = defaultRuntime.reflector;
+const syncManager = defaultRuntime.syncManager;
 let mainWindow: BrowserWindow | null = null;
 
 /** When true, skip the quit interceptor (user already confirmed). */
@@ -259,318 +166,6 @@ function syncKeepAwake(): void {
     keepAwakeId = null;
     console.log('[power] keep-awake off — no agents');
   }
-}
-
-/** A mission's live scheduler handles: the initial `setTimeout` that waits out
- *  the time remaining until its next due fire, and the steady `setInterval`
- *  armed once it has fired. Both are tracked so shutdown can clear whichever is
- *  pending. */
-interface MissionTimer {
-  timeout?: NodeJS.Timeout;
-  interval?: NodeJS.Timeout;
-}
-
-/** Active scheduler timers keyed by mission id. */
-const missionTimers = new Map<string, MissionTimer>();
-
-/** Clear and forget every armed mission timer (both the setTimeout and the
- *  setInterval handle). Safe to call from syncMissions and from shutdown
- *  teardown so a tick never fires into half-torn-down services. */
-function clearMissionTimers(): void {
-  for (const t of missionTimers.values()) {
-    if (t.timeout) clearTimeout(t.timeout);
-    if (t.interval) clearInterval(t.interval);
-  }
-  missionTimers.clear();
-}
-
-/** Rebuild the scheduler from persisted config: clear every existing timer,
- *  then arm each enabled mission honoring its lastFiredAt — a setTimeout for the
- *  time remaining until its next due fire, which then settles into a steady
- *  interval. Each tick dispatches the mission to its target agent and stamps
- *  lastFiredAt back into config. Called on boot (after the router starts) and
- *  after every missions:save. */
-function syncMissions(): void {
-  clearMissionTimers();
-  const missions = readConfig().missions ?? [];
-  for (const m of missions) {
-    if (!m.enabled || !(m.intervalMs > 0)) continue;
-    // Heartbeat (Lane A #1) opts out of the fixed setInterval and self-reschedules
-    // with an adaptive cadence. Registered into the same missionTimers map so
-    // clearMissionTimers() tears it down identically on quit/reset.
-    if (m.kind === 'heartbeat') { armHeartbeat(m); continue; }
-    const fire = (): void => {
-      try {
-        if (hive.enabled()) {
-          hive.send({ to: m.to, act: 'request', subject: m.label, body: m.body }, 'scheduler');
-        }
-        // Auto-compact: do NOT jam /compact into busy terminals. Hand it to the
-        // renderer, which queues a /compact per agent (deduped — never two at
-        // once) and delivers it only when that agent goes idle (its drain loop),
-        // so a working agent compacts between steps, never mid-step.
-        if (m.autoCompact) {
-          try { liveWebContents()?.send('mission:autoCompact'); } catch { /* window gone */ }
-        }
-        const current = readConfig().missions ?? [];
-        const next = current.map((x) =>
-          x.id === m.id ? { ...x, lastFiredAt: Date.now() } : x
-        );
-        writeConfig({ missions: next });
-        // Let the SCHEDULES panel refresh its "last fired" without a reload (#2.3).
-        try { liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
-      } catch (e) {
-        console.error('[scheduler] mission', m.id, e);
-      }
-    };
-    // Honor lastFiredAt so a partially-elapsed interval is not restarted from
-    // zero on reboot or when an unrelated mission is edited: wait only the time
-    // remaining until the next due fire, then settle into a steady interval.
-    const remaining = Math.max(0, m.intervalMs - (Date.now() - (m.lastFiredAt ?? 0)));
-    const entry: MissionTimer = {};
-    entry.timeout = setTimeout(() => {
-      fire();
-      entry.interval = setInterval(fire, m.intervalMs);
-    }, remaining);
-    missionTimers.set(m.id, entry);
-  }
-}
-
-/** One-time migration: ensure the built-in hourly ops standup exists for installs
- *  that predate it. Guarded by `opsStandupSeeded` so a user who later deletes the
- *  mission doesn't get it re-added on every boot. Stamps lastFiredAt = now so the
- *  first standup waits a full interval instead of firing (and compacting every
- *  terminal) immediately on launch. */
-function ensureDefaultMissions(): void {
-  const cfg = readConfig();
-  if (!cfg.opsStandupSeeded) {
-    const missions = cfg.missions ?? [];
-    const has = missions.some((m) => m.id === OPS_STANDUP_MISSION.id);
-    writeConfig({
-      missions: has ? missions : [...missions, { ...OPS_STANDUP_MISSION, lastFiredAt: Date.now() }],
-      opsStandupSeeded: true
-    });
-  }
-  // Seed the built-in heartbeat (Lane A #1) once. Shipped DISABLED, so it just
-  // appears in the SCHEDULES panel for the user to turn on; lastFiredAt = now so
-  // it doesn't fire on the very first launch after a user enables it.
-  const cfg2 = readConfig();
-  if (!cfg2.heartbeatSeeded) {
-    const missions = cfg2.missions ?? [];
-    const has = missions.some((m) => m.id === HEARTBEAT_MISSION.id);
-    writeConfig({
-      missions: has ? missions : [...missions, { ...HEARTBEAT_MISSION, lastFiredAt: Date.now() }],
-      heartbeatSeeded: true
-    });
-  }
-}
-
-// ─── Heartbeat (Lane A #1) + circuit-breaker beat (#6.6b) ────────────────────
-
-/** Is the team quiet? Derived ONLY from signals the main process owns or can
- *  stat — log.jsonl mtime (the master signal: every routed msg/drain/spawn/task
- *  append touches it), each agent's inbox + outbox/.sent mtimes, and every live
- *  PTY's lastOutputAt (an agent printing/thinking counts as activity). Crucially
- *  NOT registry.status, which is written 'idle' once at spawn and never
- *  transitions in main — reading it would see the team quiet forever. */
-function isFloorQuiet(thresholdMs: number): boolean {
-  const root = hive.root();
-  if (!root) return false;
-  const times: number[] = [];
-  const pushMtime = (p: string): void => { try { times.push(statSync(p).mtimeMs); } catch { /* missing */ } };
-  pushMtime(join(root, 'log.jsonl'));
-  const agentsDir = join(root, 'agents');
-  if (existsSync(agentsDir)) {
-    for (const id of readdirSync(agentsDir)) {
-      pushMtime(join(agentsDir, id, 'inbox'));
-      pushMtime(join(agentsDir, id, 'outbox', '.sent'));
-    }
-  }
-  for (const t of ptyManager.list()) times.push(t.lastOutputAt);
-  if (times.length === 0) return false; // nothing to judge → don't fire
-  return Date.now() - Math.max(...times) > thresholdMs;
-}
-
-/** Newest coordination-file mtime for one agent (inbox, outbox/.sent, memory.md)
- *  — FILES only, deliberately excluding PTY output, so "no-progress" means "not
- *  coordinating" even while the agent is busy printing tokens. */
-function lastCoordinationAt(agentId: string): number {
-  const root = hive.root();
-  if (!root) return 0;
-  const times: number[] = [0];
-  const pushMtime = (p: string): void => { try { times.push(statSync(p).mtimeMs); } catch { /* missing */ } };
-  const dir = join(root, 'agents', agentId);
-  pushMtime(join(dir, 'inbox'));
-  pushMtime(join(dir, 'outbox', '.sent'));
-  pushMtime(join(dir, 'memory.md'));
-  return Math.max(...times);
-}
-
-/** PTY id owning a given agent id, or undefined. */
-function ptyForAgent(agentId: string): string | undefined {
-  for (const [ptyId, a] of ptyToAgent) if (a === agentId) return ptyId;
-  return undefined;
-}
-
-/** "Stuck" = some worker's PTY is actively printing (recent output) while its
- *  coordination files have gone stale — working-but-not-coordinating. Tightens
- *  the heartbeat cadence so we notice a wedged agent sooner. */
-function looksStuck(windowMs: number): boolean {
-  const reg = hive.registry();
-  const now = Date.now();
-  for (const [id, a] of Object.entries(reg.agents)) {
-    if (a.archived || id === reg.godId) continue;
-    const ptyId = ptyForAgent(id);
-    if (!ptyId) continue;
-    const idle = ptyManager.idleFor(ptyId) ?? Infinity;
-    if (idle < 15_000 && now - lastCoordinationAt(id) > windowMs) return true;
-  }
-  return false;
-}
-
-/** Bounded digest for god — paths + counts, never full files (reference-passing,
- *  #6.2). A few hundred tokens at most. */
-function buildHeartbeatDigest(quietMs: number): string {
-  const reg = hive.registry();
-  const active = Object.entries(reg.agents).filter(([id, a]) => !a.archived && id !== reg.godId);
-  const names = active.map(([, a]) => a.name).join(', ') || '—';
-  const boardHead = hive.board().split('\n').slice(0, 10).join('\n').trim();
-  const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
-  const withInbox = active.filter(([id]) => hive.inbox(id).length > 0).map(([, a]) => a.name);
-  return [
-    `Idle heartbeat — quiet ~${Math.round(quietMs / 60000)}m.`,
-    `Active agents (${active.length}): ${names}.`,
-    withInbox.length ? `Undrained inbox: ${withInbox.join(', ')}.` : 'No undrained inboxes.',
-    '',
-    'Board (head):',
-    boardHead || '(empty)',
-    '',
-    'Recent log:',
-    log || '(none)',
-    '',
-    'Re-engage anyone stalled or blocked and keep the board accurate — or rest if the work is genuinely done.'
-  ].join('\n');
-}
-
-/** Re-engage a quiet floor: drop a durable digest into god's inbox. We never
- *  type directly into god's PTY here — if he's busy that would jam mid-step. The
- *  inbox message is delivered by the renderer's busy-aware inbox-wake (it nudges
- *  god to read his inbox only once he's idle), so the heartbeat defers around a
- *  working god instead of interrupting him. */
-function reengageGod(digest: string): void {
-  if (!hive.enabled()) return;
-  hive.send({ to: 'god', act: 'request', subject: 'Heartbeat', body: digest }, 'heartbeat');
-}
-
-/** A native toast for breaker constrain/stop, gated on the notifications setting. */
-function breakerToast(title: string, body: string): void {
-  if (!readConfig().notifications) return;
-  try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
-  catch { /* unsupported platform */ }
-}
-
-/** One circuit-breaker beat: pull a fresh usage sample per active agent, append
- *  it to the durable cost ledger (the SOLE durable cost store), tick the breaker,
- *  emit each BreakerState on control:breakerState (Seam 2), and enforce any
- *  escalation. God is in the LEDGER (cost visibility) but NOT the breaker inputs
- *  (the heartbeat manages god; we never auto-steer/kill the orchestrator). */
-function runBreakerBeat(progressWindowMs: number): void {
-  if (!hive.enabled()) return;
-  const reg = hive.registry();
-  const now = Date.now();
-  const inputs: BreakerInput[] = [];
-  for (const [id, a] of Object.entries(reg.agents)) {
-    if (a.archived) continue;
-    const sample = usageProvider.getAgentUsage(id);
-    if (sample) hive.appendCostLedger(sample); // ledger covers everyone incl. god
-    if (id === reg.godId) continue;            // breaker skips god
-    inputs.push({ agentId: id, sample, progressing: now - lastCoordinationAt(id) < progressWindowMs });
-  }
-  for (const d of breaker.tick(inputs, now)) {
-    try { liveWebContents()?.send('control:breakerState', d.state); } catch { /* window gone */ }
-    if (d.action === 'none') continue;
-    const name = reg.agents[d.state.agentId]?.name ?? d.state.agentId;
-    const reason = d.state.reason;
-    if (d.action === 'steer') {
-      hive.send({ to: d.state.agentId, act: 'request', subject: 'Circuit breaker: steer',
-        body: `Automated guardrail: ${reason}. Re-check your approach — if you're looping or stuck, STOP repeating, summarize what you've tried, and ask god for direction.` }, 'breaker');
-    } else if (d.action === 'constrain') {
-      hive.send({ to: d.state.agentId, act: 'request', subject: 'Circuit breaker: constrain',
-        body: `Automated guardrail escalated: ${reason}. Stop active work now: switch to read-only/plan, write a short plan of your next step, and send it to god for sign-off BEFORE running more tools.` }, 'breaker');
-      breakerToast(`${name} constrained`, reason);
-    } else if (d.action === 'stop') {
-      const ptyId = ptyForAgent(d.state.agentId);
-      if (ptyId) { try { ptyManager.kill(ptyId); } catch { /* already gone */ } teardownPty(ptyId); }
-      breakerToast(`${name} stopped by circuit breaker`, reason);
-    }
-  }
-}
-
-/** Build + write the live fleet snapshot the orchestrator reads (`<hive>/fleet.json`).
- *  Always-on (independent of the heartbeat) since `claude agents` can't see the
- *  hive's sibling sessions. PII-free; never throws (called from a timer). */
-function writeFleetSnapshot(): void {
-  if (!hive.enabled()) return;
-  try {
-    const reg = hive.registry();
-    const snap = telemetry.snapshot();
-    const usageById = new Map(snap.usage.map((u) => [u.agentId, u]));
-    const now = Date.now();
-    const agents = Object.entries(reg.agents)
-      .filter(([, a]) => !a.archived)
-      .map(([id, a]) => {
-        const u = usageById.get(id);
-        const spans = snap.spans[id] ?? [];
-        const tokens = u ? u.input + u.output + u.cacheRead + u.cacheCreation : 0;
-        return {
-          id,
-          name: a.name,
-          role: a.role ?? (a.isGod ? 'orchestrator' : 'agent'),
-          cwd: a.cwd,
-          isGod: !!a.isGod,
-          breaker: breaker.levelFor(id),
-          tokens,
-          usd: u ? Number(u.usd.toFixed(4)) : 0,
-          lastTool: spans.length ? spans[spans.length - 1].tool : null,
-          lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
-          inboxBacklog: hive.inboxBacklog(id)
-        };
-      });
-    hive.writeFleetSnapshot({ ts: now, agents });
-  } catch (e) {
-    console.error('[fleet] snapshot failed:', e);
-  }
-}
-
-/** Arm the heartbeat with an adaptive, self-rescheduling cadence (recursive
- *  setTimeout instead of a fixed setInterval). Each beat runs the cost/breaker
- *  pass, re-engages a quiet team, stamps lastFiredAt, then re-arms: ~base on a
- *  normal beat, base/4 (min 30s) when an agent looks stuck, base*2.5 right after
- *  a re-engage. Registered into missionTimers so shutdown tears it down. */
-function armHeartbeat(m: ScheduledMission): void {
-  const base = m.intervalMs;
-  const quiet = m.quietThresholdMs ?? 300_000;
-  const beat = (): void => {
-    let next = base;
-    try {
-      // (the breaker beat + cost ledger now run on their own always-on timer)
-      if (isFloorQuiet(quiet)) {
-        reengageGod(buildHeartbeatDigest(quiet));
-        next = Math.round(base * 2.5);            // back off after re-engaging
-      } else if (looksStuck(quiet)) {
-        next = Math.max(30_000, Math.round(base / 4)); // tighten when an agent is wedged
-      }
-      const cur = readConfig().missions ?? [];
-      writeConfig({ missions: cur.map((x) => (x.id === m.id ? { ...x, lastFiredAt: Date.now() } : x)) });
-      try { liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
-    } catch (e) {
-      console.error('[heartbeat]', e);
-    }
-    const entry = missionTimers.get(m.id) ?? {};
-    entry.timeout = setTimeout(beat, next);
-    missionTimers.set(m.id, entry);
-  };
-  const remaining = Math.max(0, base - (Date.now() - (m.lastFiredAt ?? 0)));
-  missionTimers.set(m.id, { timeout: setTimeout(beat, remaining) });
 }
 
 /** The live renderer webContents, or null if the window is gone/destroyed.
@@ -1216,15 +811,12 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // Tear down everything bound to the OLD root before copying, so nothing writes
   // mid-copy — a live git commit into hive/.git would otherwise be copied as a
   // half-written object and corrupt the moved repo.
-  try { clearMissionTimers(); } catch (e) { console.error('[changeHome] clearMissionTimers:', e); }
-  try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
-  try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
+  // Stop every team's services (router, hooks, telemetry, sync, reflector,
+  // thoughts, mission scheduler, beats), then the GLOBAL servers/probe.
+  for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[changeHome] runtime.stop:', e); } }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
-  try { syncManager.stop(); } catch { /* best-effort */ }
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
-  try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
-  try { thoughts.stop(); } catch (e) { console.error('[changeHome] thoughts.stop:', e); }
 
   if (mode === 'move' && oldHome) {
     try {
@@ -1406,15 +998,10 @@ function teardownAndQuit(): void {
   allowQuit = true;
   // Each teardown step is best-effort: a throw here (e.g. a dying child or a
   // half-torn-down socket) must never abort the quit or pop a crash dialog.
-  try { clearMissionTimers(); } catch (e) { console.error('[quit] clearMissionTimers:', e); }
-  try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
-  try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
-  try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
+  // Stop every team's services, then the GLOBAL servers/probe/store + PTYs.
+  for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[quit] runtime.stop:', e); } }
   try { stopSlackServer(); } catch (e) { console.error('[quit] slack.stop:', e); }
-  try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[quit] memory.stop:', e); }
-  try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
-  try { thoughts.stop(); } catch (e) { console.error('[quit] thoughts.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
   app.quit();
@@ -1451,15 +1038,10 @@ ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 ipcMain.handle('app:resetAll', () => {
   allowQuit = true;
   // Tear everything down first so nothing writes back into the dirs we wipe.
-  try { clearMissionTimers(); } catch (e) { console.error('[reset] clearMissionTimers:', e); }
-  try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
-  try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
-  try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
+  // Stop every team's services, then the GLOBAL servers/probe/store + PTYs.
+  for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[reset] runtime.stop:', e); } }
   try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
-  try { syncManager.stop(); } catch { /* best-effort */ }
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
-  try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
-  try { thoughts.stop(); } catch (e) { console.error('[reset] thoughts.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
   // Erase the hive (the orchestrator's + every agent's memory, inboxes, tasks,
@@ -1561,7 +1143,10 @@ ipcMain.handle('missions:save', (_evt, missions) => {
     return { ...m, lastFiredAt };
   });
   writeConfig({ missions: merged });
-  syncMissions();
+  // Global config.missions is the DEFAULT team's mission list; re-arm its
+  // scheduler. (BE-7 threads a teamId so per-team mission edits re-arm the right
+  // runtime; until then missions:save targets the default team.)
+  defaultRuntime.syncMissions();
   return { ok: true };
 });
 
@@ -1839,36 +1424,19 @@ ipcMain.handle('webhook:setConfig', (_evt, patch: unknown) => {
   return { ok: true };
 });
 
-/** Start every hive-bound background service against the current harnessHome.
+/** Start every team's background services against the current harnessHome.
  *  Called on boot, and again to recover in place if a folder-change copy fails
- *  (config:changeHome tears these down before copying). No-op without a home. */
+ *  (config:changeHome tears these down before copying). Seeds the legacy hive as
+ *  the 'default' team (NO-MOVE — nothing on disk moves), warms the GLOBAL Ollama
+ *  memory probe once, then starts each TeamRuntime (Phase 1: just the default
+ *  team; each runtime no-ops without a home). */
 function bootstrapHiveServices(): void {
-  if (!hive.enabled()) return;
-  hive.ensureHive();
-  hive.startRouter();
-  ensureDefaultMissions(); // one-time: seed the built-in hourly ops standup
-  syncMissions(); // arm recurring auto-dispatch missions now the router is live
-  hookServer.start();
-  // Bind the telemetry collector BEFORE the renderer spawns any agent, then point
-  // the hive at it so every subsequent spawn is instrumented. Best-effort — a bind
-  // failure just leaves telemetry off (transcript reconciler stays). No breaker.start():
-  // the breaker is POLICY-only, ticked by the heartbeat beat (#1, ships disabled).
-  void telemetry.start().then((r) => {
-    if (r.ok && r.endpoint) { hive.setOtelEndpoint(r.endpoint); console.log('[telemetry] collector listening', r.endpoint); }
-    else console.error('[telemetry] collector failed to start:', r.error);
-  });
-  memory.start(); // warm the Ollama reachability probe (embedding rides the sync beat)
-  reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
-  thoughts.start(); // twice-daily agent-board ideas (no-op until sync on + signed in)
-
-  // Always-on beats (decoupled from the optional heartbeat): the live fleet
-  // snapshot the orchestrator reads (~8s) + the breaker/cost-ledger beat (~30s). Guarded so
-  // a re-bootstrap (changeHome recovery) can't stack duplicate timers.
-  if (fleetTimer) clearInterval(fleetTimer);
-  writeFleetSnapshot();
-  fleetTimer = setInterval(writeFleetSnapshot, 8_000);
-  if (breakerBeatTimer) clearInterval(breakerBeatTimer);
-  breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
+  if (!readConfig().harnessHome) return;
+  // Register the legacy hive under the 'default' team (idempotent). godId is read
+  // from the live registry so the default team records the existing god.
+  try { ensureDefaultTeam(hive.registry().godId ?? 'god'); } catch (e) { console.error('[boot] ensureDefaultTeam:', e); }
+  memory.start(); // GLOBAL Ollama reachability probe (one per app; embedding rides each team's sync beat)
+  for (const rt of teams.values()) rt.start();
 }
 
 app.whenReady().then(() => {
@@ -1881,10 +1449,9 @@ app.whenReady().then(() => {
   // Guarded: a DB failure (e.g. a bad native build) must degrade to defaults,
   // never block app startup.
   try { persist.open(); } catch (e) { console.error('[db] open failed:', e); }
-  // Auto-start collaborative sync when enabled. start() self-gates on a complete
-  // config and lazily imports the optional supabase client; best-effort by design.
-  if (readConfig().syncEnabled) void syncManager.start();
-  // Bootstrap the hive (if harnessHome is configured) and start the message router.
+  // Bootstrap every team's services (router, hooks, telemetry, sync, beats). Each
+  // TeamRuntime.start() self-gates collaborative sync on syncEnabled + a complete
+  // config (lazy supabase import), so no separate sync auto-start is needed here.
   bootstrapHiveServices();
   createWindow();
   // Auto-start the Slack webhook server when configured. Best-effort: a tunnel

@@ -201,16 +201,28 @@ function ensureMineIgnore(agentDir: string): void {
 // ─── HiveManager ────────────────────────────────────────────────────────────
 
 export class HiveManager {
+  /** Which team this hive belongs to. Multi-team: each team gets its own
+   *  HiveManager whose `getHome` resolves to that team's home (default team →
+   *  harnessHome; clones → `<harnessHome>/teams/<id>`), so the root + every
+   *  root-relative read/write is team-correct with no per-callsite edits. Used
+   *  for logging and the teamId stamp on emitted renderer events. */
+  readonly teamId: string;
+
   /**
-   * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
+   * @param getHome  Lazily resolve this team's home so the hive follows config changes.
    * @param emit     Optional sink for renderer-facing events (set by the main
    *                 process to `webContents.send`). Used to surface routed
-   *                 messages in the dashboard; a no-op in tests/headless.
+   *                 messages in the dashboard; a no-op in tests/headless. The
+   *                 main process wraps this to stamp `teamId` on every payload.
+   * @param teamId   Owning team id (defaults to the legacy 'default' team).
    */
   constructor(
     private getHome: () => string | null,
-    private emit?: (channel: string, payload: unknown) => boolean | void
-  ) {}
+    private emit?: (channel: string, payload: unknown) => boolean | void,
+    teamId = 'default'
+  ) {
+    this.teamId = teamId;
+  }
 
   private routerTimer: NodeJS.Timeout | null = null;
 

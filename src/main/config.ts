@@ -92,6 +92,39 @@ export interface CircuitBreakerConfig {
   tokenVelocityPerMin?: number;
 }
 
+/** The canonical id of the original/legacy team. NO-MOVE migration: the default
+ *  team's HiveManager home resolves to `harnessHome` itself (so its hive root
+ *  stays `<harnessHome>/hive`, untouched). Only cloned/new teams live under
+ *  `<harnessHome>/teams/<teamId>/hive`. */
+export const DEFAULT_TEAM_ID = 'default';
+
+/** One team in a multi-team install. The default team is the legacy hive
+ *  (configs only — its on-disk state stays at `<harnessHome>/hive`); cloned teams
+ *  get their own subdir + their own service runtime. Per-team mission/sync/cap
+ *  fields fall back to the global `HarnessConfig` values when unset (so the
+ *  default team behaves exactly as a single-team install always has). */
+export interface TeamConfig {
+  /** Stable slug + short suffix; the dir name under `teams/`. 'default' is the
+   *  legacy team (special-cased to live at `<harnessHome>/hive`). */
+  id: string;
+  /** Display name shown in the team selector. */
+  name: string;
+  createdAt: number;
+  /** Usually 'god'; tracked for clarity / future per-team god ids. */
+  godId: string;
+  /** Per-team Supabase workspace id. Unset ⇒ falls back to the global
+   *  `syncWorkspaceId` (the default team shares the legacy global value). */
+  syncWorkspaceId?: string;
+  /** Per-team scheduled missions. Unset ⇒ falls back to the global `missions`
+   *  (the default team keeps using the legacy global mission list + its
+   *  lastFiredAt bookkeeping, so behavior is byte-identical to today). */
+  missions?: ScheduledMission[];
+  /** Per-team breaker token ceiling; unset ⇒ global `costCapTokens` fallback. */
+  costCapTokens?: number;
+  /** Per-team per-agent token caps; unset ⇒ global `agentTokenCaps` fallback. */
+  agentTokenCaps?: Record<string, number>;
+}
+
 export interface HarnessConfig {
   /** Has the user completed the first-run onboarding? */
   onboardingComplete: boolean;
@@ -115,8 +148,17 @@ export interface HarnessConfig {
   /** Ollama embedding model tag. Default 'nomic-embed-text' (768-dim — must match
    *  the memory_chunks vector width; changing it requires a re-embed). */
   ollamaEmbedModel?: string;
-  /** Recurring auto-dispatch missions handled by the scheduler. */
+  /** Recurring auto-dispatch missions handled by the scheduler. With multi-team
+   *  this stays the DEFAULT team's mission list (per-team missions live on each
+   *  TeamConfig and fall back here when unset). */
   missions?: ScheduledMission[];
+  /** Multi-team registry. Absent on legacy installs → a single 'default' team is
+   *  seeded at boot (NO-MOVE: it points at the existing `<harnessHome>/hive`). */
+  teams?: TeamConfig[];
+  /** One-time guard: has the 'default' TeamConfig been seeded into config.teams?
+   *  NO-MOVE migration — nothing on disk moves; this only marks the legacy hive as
+   *  registered under the default team so the seed never runs twice. */
+  teamsMigrated?: boolean;
   /** One-time guard: has the built-in hourly ops standup been seeded into an
    *  existing install's missions? Prevents re-adding it after a user deletes it. */
   opsStandupSeeded?: boolean;
@@ -270,6 +312,125 @@ export function resetConfig(): HarnessConfig {
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), 'utf8');
   return { ...DEFAULTS };
+}
+
+/** Atomic read-modify-write against config.json. `readConfig → mutate → write`
+ *  runs fully synchronously (no await between the read and the write), so it can
+ *  never interleave with another mutateConfig/writeConfig call — closing the
+ *  lost-update window §7.9 flags once N parallel teams each persist their own
+ *  mission `lastFiredAt`. Prefer this over the read-then-writeConfig(patch)
+ *  pattern whenever the new value depends on the current one. */
+export function mutateConfig(mutate: (cfg: HarnessConfig) => void): HarnessConfig {
+  const next = readConfig();
+  mutate(next);
+  const p = configPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
+// ─── Multi-team helpers ──────────────────────────────────────────────────────
+
+/** Absolute home dir for a team. The HiveManager builds its root as
+ *  `join(home, 'hive')`, so the default team's home is `harnessHome` itself
+ *  (root stays `<harnessHome>/hive` — NO-MOVE), and every other team lives under
+ *  `<harnessHome>/teams/<id>` (root = `<harnessHome>/teams/<id>/hive`). */
+export function teamHome(harnessHome: string, id: string): string {
+  return id === DEFAULT_TEAM_ID ? harnessHome : join(harnessHome, 'teams', id);
+}
+
+/** All registered teams. On a legacy/un-migrated config this returns a single
+ *  synthetic default team so callers always see at least one team (the on-disk
+ *  seed is done by ensureDefaultTeam at boot). */
+export function listTeams(cfg: HarnessConfig = readConfig()): TeamConfig[] {
+  if (cfg.teams && cfg.teams.length) return cfg.teams;
+  return [{ id: DEFAULT_TEAM_ID, name: 'Default', createdAt: 0, godId: 'god' }];
+}
+
+export function getTeam(id: string, cfg: HarnessConfig = readConfig()): TeamConfig | undefined {
+  return listTeams(cfg).find((t) => t.id === id);
+}
+
+/** Register a new team (clone flow, Phase 2). Idempotent on id. */
+export function addTeam(team: TeamConfig): HarnessConfig {
+  return mutateConfig((c) => {
+    const teams = c.teams ?? listTeams(c);
+    if (!teams.some((t) => t.id === team.id)) teams.push(team);
+    c.teams = teams;
+  });
+}
+
+/** Drop a team from the registry. Team removal is OUT of v1 (no IPC surface);
+ *  the helper exists for completeness + future use. Never removes 'default'. */
+export function removeTeam(id: string): HarnessConfig {
+  return mutateConfig((c) => {
+    if (id === DEFAULT_TEAM_ID) return;
+    c.teams = (c.teams ?? listTeams(c)).filter((t) => t.id !== id);
+  });
+}
+
+/** Idempotently seed the 'default' TeamConfig into config.teams (NO-MOVE: nothing
+ *  on disk moves — the existing `<harnessHome>/hive` stays put and the default
+ *  team's home resolves to `harnessHome`). Guarded by `teamsMigrated`. `godId` is
+ *  carried in by the caller (read from the live registry) so the default team
+ *  records the existing god. */
+export function ensureDefaultTeam(godId: string = 'god'): HarnessConfig {
+  const cfg = readConfig();
+  if (cfg.teamsMigrated && cfg.teams && cfg.teams.length) return cfg;
+  return mutateConfig((c) => {
+    if (!c.teams || !c.teams.length) {
+      c.teams = [{ id: DEFAULT_TEAM_ID, name: 'Default', createdAt: Date.now(), godId }];
+    }
+    c.teamsMigrated = true;
+  });
+}
+
+/** One-time seed of the built-in ops-standup + heartbeat missions into the GLOBAL
+ *  mission list (the default team's). Guarded by `opsStandupSeeded`/`heartbeatSeeded`
+ *  so a user who deletes either doesn't get it re-added every boot. Stamps
+ *  lastFiredAt = now so the first fire waits a full interval. (Clones seed their
+ *  own missions at clone time; this only seeds the default/global list.) */
+export function ensureDefaultMissions(): void {
+  const cfg = readConfig();
+  if (!cfg.opsStandupSeeded) {
+    const missions = cfg.missions ?? [];
+    const has = missions.some((m) => m.id === OPS_STANDUP_MISSION.id);
+    writeConfig({
+      missions: has ? missions : [...missions, { ...OPS_STANDUP_MISSION, lastFiredAt: Date.now() }],
+      opsStandupSeeded: true
+    });
+  }
+  const cfg2 = readConfig();
+  if (!cfg2.heartbeatSeeded) {
+    const missions = cfg2.missions ?? [];
+    const has = missions.some((m) => m.id === HEARTBEAT_MISSION.id);
+    writeConfig({
+      missions: has ? missions : [...missions, { ...HEARTBEAT_MISSION, lastFiredAt: Date.now() }],
+      heartbeatSeeded: true
+    });
+  }
+}
+
+/** Per-team mission list with global fallback. The default team has no own
+ *  `missions` (it keeps using the global list), so this returns `cfg.missions`
+ *  for it and the team's own list for clones. */
+export function teamMissions(id: string, cfg: HarnessConfig = readConfig()): ScheduledMission[] {
+  return getTeam(id, cfg)?.missions ?? cfg.missions ?? [];
+}
+
+/** Per-team Supabase workspace id with global fallback. */
+export function teamSyncWorkspaceId(id: string, cfg: HarnessConfig = readConfig()): string {
+  return getTeam(id, cfg)?.syncWorkspaceId ?? cfg.syncWorkspaceId ?? '';
+}
+
+/** Per-team breaker token cap with global fallback. */
+export function teamCostCapTokens(id: string, cfg: HarnessConfig = readConfig()): number | undefined {
+  return getTeam(id, cfg)?.costCapTokens ?? cfg.costCapTokens;
+}
+
+/** Per-team per-agent token caps with global fallback. */
+export function teamAgentTokenCaps(id: string, cfg: HarnessConfig = readConfig()): Record<string, number> | undefined {
+  return getTeam(id, cfg)?.agentTokenCaps ?? cfg.agentTokenCaps;
 }
 
 /** Model ids by tier (Lane A #6.4). Kept in sync with AGENT_MODELS in
