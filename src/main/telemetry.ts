@@ -114,8 +114,10 @@ export interface TelemetryCollectorOptions {
   port?: number;
   /** Sink for renderer-facing events (set to `webContents.send`). No-op in tests. */
   emit?: (channel: string, payload: unknown) => void;
-  /** Resolve an agent's cwd (from the hive registry) for the transcript fallback. */
-  resolveCwd?: (agentId: string) => string | null;
+  /** Resolve an agent's paths (from the hive registry) for the transcript fallback.
+   *  `claudeHome` is the agent's CLAUDE_CONFIG_DIR base (e.g. `<agentDir>/.cchome`
+   *  for RES-4-isolated workers); omit for god / shared `~/.claude`. */
+  resolveCwd?: (agentId: string) => { cwd: string; claudeHome?: string } | null;
 }
 
 export class TelemetryCollector {
@@ -124,7 +126,7 @@ export class TelemetryCollector {
   private readonly host: string;
   private readonly port: number;
   private readonly emit?: (channel: string, payload: unknown) => void;
-  private readonly resolveCwd?: (agentId: string) => string | null;
+  private readonly resolveCwd?: (agentId: string) => { cwd: string; claudeHome?: string } | null;
 
   /** sessionId → running accumulation. */
   private readonly sessions = new Map<string, SessionAccum>();
@@ -402,9 +404,10 @@ export class TelemetryCollector {
   }
 
   private transcriptFallback(agentId: string): AgentUsageSample | null {
-    const cwd = this.resolveCwd?.(agentId);
-    if (!cwd) return null;
-    const u = readAgentUsage(cwd);
+    const info = this.resolveCwd?.(agentId);
+    if (!info) return null;
+    const { cwd, claudeHome } = info;
+    const u = readAgentUsage(cwd, {}, claudeHome);
     if (!u.inputTokens && !u.outputTokens && !u.cacheReadTokens && !u.cacheWriteTokens) return null;
     return {
       agentId,

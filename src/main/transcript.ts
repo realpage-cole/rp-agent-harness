@@ -4,16 +4,19 @@ import path from 'node:path';
 import { estimateCostUsd, normalizeModel } from './pricing';
 
 /** Resolve the Claude Code transcript directory for a given working directory.
- *  Claude Code stores per-project transcripts under ~/.claude/projects, keying
- *  each project by its absolute cwd with EVERY non-alphanumeric character turned
- *  into a dash — the leading slash included, so the key keeps a leading dash, and
- *  dots in path segments (e.g. a "cole.calderon" home) are dashed too. So
- *  /Users/cole.calderon/app → -Users-cole-calderon-app, and on Windows
- *  C:\Users\me\app → C--Users-me-app. (The earlier POSIX-only scheme dropped the
- *  leading slash and left dots intact, so it never matched Claude's real dir and
- *  every transcript lookup silently missed.) */
-export function projectDir(cwd: string): string {
-  return path.join(os.homedir(), '.claude/projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'));
+ *  Claude Code stores per-project transcripts under `<claudeHome>/projects`,
+ *  keying each project by its absolute cwd with EVERY non-alphanumeric character
+ *  turned into a dash — the leading slash included, so the key keeps a leading
+ *  dash, and dots in path segments (e.g. a "cole.calderon" home) are dashed too.
+ *  So /Users/cole.calderon/app → -Users-cole-calderon-app, and on Windows
+ *  C:\Users\me\app → C--Users-me-app.
+ *
+ *  `claudeHome` is the agent's CLAUDE_CONFIG_DIR base (e.g. `<agentDir>/.cchome`
+ *  for RES-4-isolated workers). Omit for god / unmanaged agents, which use the
+ *  shared `~/.claude` home. */
+export function projectDir(cwd: string, claudeHome?: string): string {
+  const base = claudeHome ?? path.join(os.homedir(), '.claude');
+  return path.join(base, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'));
 }
 
 export interface AgentUsage {
@@ -46,11 +49,13 @@ export interface ReadUsageOptions {
  *  (fixes bug #2). Resilient by design: any unreadable file or malformed line is
  *  skipped, and any unexpected failure yields a zeroed result rather than
  *  throwing into the IPC handler. This is the OFFLINE reconciler / fallback —
- *  the live source is the OTel collector (`telemetry.ts`). */
-export function readAgentUsage(cwd: string, opts: ReadUsageOptions = {}): AgentUsage {
+ *  the live source is the OTel collector (`telemetry.ts`).
+ *
+ *  `claudeHome` is the agent's CLAUDE_CONFIG_DIR base; omit for god / shared home. */
+export function readAgentUsage(cwd: string, opts: ReadUsageOptions = {}, claudeHome?: string): AgentUsage {
   const usage = zero();
   try {
-    const dir = projectDir(cwd);
+    const dir = projectDir(cwd, claudeHome);
     if (!existsSync(dir)) return usage;
     const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
     let lastModel: string | undefined;

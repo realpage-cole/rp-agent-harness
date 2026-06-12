@@ -131,7 +131,16 @@ export class TeamRuntime {
 
     this.telemetry = new TelemetryCollector({
       emit: (ch, p) => this.emit(ch, p),
-      resolveCwd: (agentId) => this.hive.registry().agents[agentId]?.cwd ?? null
+      resolveCwd: (agentId) => {
+        const agent = this.hive.registry().agents[agentId];
+        if (!agent) return null;
+        const root = this.hive.root();
+        // RES-4: workers write transcripts under <agentDir>/.cchome; god uses ~./claude.
+        const claudeHome = !agent.isGod && root
+          ? join(root, 'agents', agentId, '.cchome')
+          : undefined;
+        return { cwd: agent.cwd, claudeHome };
+      }
     });
     this.usageProvider = this.telemetry;
 
