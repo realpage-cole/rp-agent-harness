@@ -1104,7 +1104,15 @@ ipcMain.handle('hive:traceDetails', (_evt, agentId: unknown, limit: unknown, tea
   const r = rt(teamId);
   return traceDetails(
     agentId,
-    (id) => r.hive.registry().agents[id]?.cwd ?? null,
+    (id) => {
+      const agent = r.hive.registry().agents[id];
+      if (!agent) return null;
+      const root = r.hive.root();
+      const claudeHome = !agent.isGod && root
+        ? join(root, 'agents', id, '.cchome')
+        : undefined;
+      return { cwd: agent.cwd, claudeHome };
+    },
     (id) => r.telemetry.getAgentSessionId(id),
     typeof limit === 'number' ? limit : 200
   );

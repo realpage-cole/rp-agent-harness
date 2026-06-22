@@ -43,6 +43,10 @@ export interface HiddenClaudeOptions {
   timeoutMs?: number;
   /** Extra env merged over the resolved shell env (e.g. memory tooling). */
   env?: Record<string, string>;
+  /** CLAUDE_CONFIG_DIR base for RES-4-isolated workers (e.g. `<agentDir>/.cchome`).
+   *  When set, transcript extraction reads from `<claudeHome>/projects/…` instead
+   *  of `~/.claude/projects/…`. Omit for sessions that use the default home. */
+  claudeHome?: string;
 }
 
 export interface HiddenClaudeResult {
@@ -56,9 +60,9 @@ export interface HiddenClaudeResult {
  * Extract the last assistant text block from the transcript JSONL written
  * at or after `spawnedAt`. Reuses projectDir() from transcript.ts.
  */
-function extractLastAssistantText(cwd: string, spawnedAt: number): string | null {
+function extractLastAssistantText(cwd: string, spawnedAt: number, claudeHome?: string): string | null {
   try {
-    const dir = projectDir(cwd);
+    const dir = projectDir(cwd, claudeHome);
     if (!existsSync(dir)) return null;
 
     const candidates: { f: string; mtime: number }[] = [];
@@ -164,7 +168,7 @@ export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Prom
     };
 
     const captureAndFinish = () => {
-      const text = extractLastAssistantText(opts.cwd, spawnedAt);
+      const text = extractLastAssistantText(opts.cwd, spawnedAt, opts.claudeHome);
       finish(text
         ? { ok: true, text }
         : { ok: false, error: 'no assistant response found in transcript' });
