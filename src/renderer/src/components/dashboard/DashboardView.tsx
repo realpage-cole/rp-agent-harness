@@ -8,6 +8,7 @@ import { NotepadBoard } from './NotepadBoard';
 import { NeedsYouBanner } from './NeedsYouBanner';
 import { HiveViewSelector } from './HiveViewSelector';
 import { TeamSelector } from './TeamSelector';
+import { TeamActionsMenu } from './TeamActionsMenu';
 import { CloneTeamModal } from './CloneTeamModal';
 
 /**
@@ -57,6 +58,8 @@ export function DashboardView() {
         >
           + Clone team
         </button>
+        {/* Per-team destructive actions (clear work history / delete team). */}
+        <TeamActionsMenu />
         {/* Unified view toggle — switches roster + kanban between your hive and a
             teammate's (read-only) together. */}
         <HiveViewSelector />

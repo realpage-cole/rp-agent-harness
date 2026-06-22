@@ -533,7 +533,15 @@ const api = {
   /** Clone a team (configs-only, fresh start) and bring it up live in parallel. */
   cloneTeam: (sourceTeamId: string, newName: string): Promise<CloneTeamResult> =>
     ipcRenderer.invoke('teams:clone', sourceTeamId, newName),
-  /** Subscribe to team lifecycle events (created / status). Returns unsubscribe fn. */
+  /** Delete a team (non-default only): stops it, kills its PTYs, erases its
+   *  on-disk subtree, and emits a 'removed' lifecycle event. */
+  teamsRemove: (teamId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('teams:remove', teamId),
+  /** Clear a team's work history — tasks, board, pulse, and activity log — while
+   *  keeping the roster, agent memory, and cost ledger. Omit teamId for default. */
+  clearHistory: (teamId?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('hive:clearHistory', teamId),
+  /** Subscribe to team lifecycle events (created / status / removed). Returns unsubscribe fn. */
   onTeamsEvent: (cb: (ev: TeamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, ev: TeamEvent) => cb(ev);
     ipcRenderer.on('teams:event', listener);

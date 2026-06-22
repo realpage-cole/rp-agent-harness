@@ -27,7 +27,9 @@ export interface CloneTeamResult {
  *  are — these are ABOUT the team set, so the payload names the team directly.
  *  - 'created': a new team came online (carries the full summary so the renderer
  *    can add + switch to it).
- *  - 'status': a team's running/agentCount changed (so badges stay live). */
+ *  - 'status': a team's running/agentCount changed (so badges stay live).
+ *  - 'removed': a team was deleted (so the renderer drops it + switches away). */
 export type TeamEvent =
   | { kind: 'created'; teamId: string; summary: TeamSummary }
-  | { kind: 'status'; teamId: string; running: boolean; agentCount: number };
+  | { kind: 'status'; teamId: string; running: boolean; agentCount: number }
+  | { kind: 'removed'; teamId: string };
