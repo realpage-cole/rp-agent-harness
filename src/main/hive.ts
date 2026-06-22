@@ -332,6 +332,19 @@ export class HiveManager {
   }
 
   /**
+   * Throw if the user has not run `claude login`. Call before spawning any agent
+   * so the UI can surface a clear message instead of letting agents spawn and fail
+   * silently with auth errors. Checks for the oauthAccount key in ~/.claude.json.
+   */
+  assertLoggedIn(): void {
+    try {
+      const cfg = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8'));
+      if (cfg.oauthAccount) return;
+    } catch { /* file missing → not logged in */ }
+    throw new Error('Not logged in to Claude Code. Run `claude login` in your terminal first.');
+  }
+
+  /**
    * Ensure an agent's workspace + registry entry, returning the spawn injection
    * (provider-specific args + env) that makes the process hive-aware.
    */
@@ -441,23 +454,6 @@ export class HiveManager {
     const args: string[] = [];
     if (!claudeProvider) return { args, env };
 
-    // Billing — ALL Claude agents (incl. god) authenticate via an Anthropic API
-    // key so usage bills to the API/console org rather than an OAuth subscription.
-    // The key also auths a fresh CLAUDE_CONFIG_DIR (which bypasses the macOS
-    // keychain), so it doubles as the isolated workers' credential — replacing the
-    // earlier `claude setup-token` OAuth token (which billed the subscription and
-    // triggered an override warning on interactive /login). Kept out of git.
-    try {
-      const keyFile = join(root, '.secrets', 'anthropic-api-key');
-      if (existsSync(keyFile)) {
-        const key = readFileSync(keyFile, 'utf8').trim();
-        if (key) env.ANTHROPIC_API_KEY = key;
-      }
-    } catch { /* best-effort: fall back to the home's own auth */ }
-    // Never carry a subscription OAuth token into the spawn env — it would
-    // override the API key and silently bill the subscription instead.
-    delete env.CLAUDE_CODE_OAUTH_TOKEN;
-
     // RES-4 — FULL per-agent tool isolation: each WORKER gets its own Claude config
     // home so it only sees the MCP servers + plugins provisioned into it
     // (hive/agent-tooling.json + hive/bin/provision_agent_tools.py). god is the
@@ -467,12 +463,22 @@ export class HiveManager {
       mkdirSync(cchome, { recursive: true });
       env.CLAUDE_CONFIG_DIR = cchome;
       // Seed onboarding + workspace trust once so a fresh isolated home never prompts.
+      // Also forward the oauthAccount block from the shared ~/.claude.json so the
+      // worker's isolated home matches the keychain entry (token lives in the macOS
+      // keychain under service "Claude Code" / OS username — shared across all
+      // processes running as this user, so no token copy is needed).
       const cfgJson = join(cchome, '.claude.json');
       if (!existsSync(cfgJson)) {
+        let oauthAccount: unknown = undefined;
+        try {
+          const sharedCfg = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8'));
+          oauthAccount = sharedCfg.oauthAccount;
+        } catch { /* no shared config — worker will prompt for login */ }
         this.writeJson(cfgJson, {
           hasCompletedOnboarding: true,
           projects: { [root]: { hasTrustDialogAccepted: true } },
-          mcpServers: {}
+          mcpServers: {},
+          ...(oauthAccount ? { oauthAccount } : {})
         });
       }
     }

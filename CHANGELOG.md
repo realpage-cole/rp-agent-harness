@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format is based on
 - **Per-agent tool isolation via `CLAUDE_CONFIG_DIR`.** Each worker now spawns with its own `CLAUDE_CONFIG_DIR` at `<agentDir>/.cchome` (seeded with onboarding + workspace-trust accepted), so its MCP servers, plugins, and Claude Code session state are isolated to that agent and provisioned per-agent instead of inherited from the global `~/.claude`. The god orchestrator keeps the shared home for full access.
 
 ### Changed
-- **All agents bill the API account.** Every agent — workers *and* god — is now spawned with `ANTHROPIC_API_KEY` read from the team hive's `.secrets/anthropic-api-key`, replacing the previous OAuth subscription token. Any inherited `CLAUDE_CODE_OAUTH_TOKEN` is stripped from the spawn env so it can't silently override the key and bill the subscription.
+- **Enterprise OAuth auth (drop API key billing).** Agents now authenticate via the enterprise `claude login` OAuth session instead of an `ANTHROPIC_API_KEY` file. The `.secrets/anthropic-api-key` injection and the `CLAUDE_CODE_OAUTH_TOKEN` suppression are both removed. Each worker's isolated `.cchome` is seeded with the `oauthAccount` metadata from `~/.claude.json` so it matches the shared macOS keychain entry; no token copy is needed. A pre-flight check surfaces a clear error if the user has not run `claude login` before spawning agents.
 
 ## [0.2.3] — 2026-06-09
 
