@@ -789,6 +789,10 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // provider-specific spawn injection. Non-Claude providers get shared AGENT_*
   // env only; Claude Code also gets prompt/settings hook args.
   if (opts.hive && teamHive.enabled()) {
+    if (claudeProvider) {
+      try { teamHive.assertLoggedIn(); }
+      catch (e) { return { ok: false, error: (e as Error).message }; }
+    }
     try {
       const inj = teamHive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
