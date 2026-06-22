@@ -91,6 +91,20 @@ input, textarea, [contenteditable='true'] {
   background: var(--cth-cream-300) !important;
 }
 
+/* Inline chip buttons (team switcher, view toggles) — rounded, with a smooth
+   hover. Components set their own background/box-shadow inline (incl. active
+   state); this layer only adds geometry, motion, and a neutral hover fill. */
+.cth-chip {
+  border-radius: var(--cth-radius-md);
+  transition: background var(--cth-dur-fast) var(--cth-ease),
+              box-shadow var(--cth-dur-fast) var(--cth-ease),
+              transform var(--cth-dur-fast) var(--cth-ease);
+}
+.cth-chip:not([data-active='true']):hover {
+  background: var(--cth-cream-200) !important;
+}
+.cth-chip:active { transform: translateY(0.5px); }
+
 /* Keyframes — gentle eased motion */
 @keyframes cth-blink {
   0%, 100% { opacity: 1; }

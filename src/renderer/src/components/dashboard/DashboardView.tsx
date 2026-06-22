@@ -44,14 +44,15 @@ export function DashboardView() {
         <TeamSelector />
         {/* Clone the active team into a fresh parallel team (FE-5). */}
         <button
+          className="cth-chip"
           onClick={() => setCloneOpen(true)}
           title={`Clone ${team.name} into a new team`}
           style={{
-            padding: '3px 10px 1px',
-            background: 'var(--cth-cream-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+            padding: '4px 10px',
+            background: 'var(--cth-cream-50)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 13,
-            color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none'
+            color: 'var(--cth-ink-700)', cursor: 'pointer', border: 'none'
           }}
         >
           + Clone team
@@ -64,14 +65,17 @@ export function DashboardView() {
           {(['kanban', 'notepad'] as const).map((v) => (
             <button
               key={v}
+              className="cth-chip"
+              data-active={centerView === v}
               onClick={() => setCenterView(v)}
               style={{
-                padding: '3px 10px 1px',
-                background: centerView === v ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)',
+                padding: '4px 10px',
+                background: centerView === v ? 'var(--cth-sky-light)' : 'var(--cth-cream-50)',
                 boxShadow: centerView === v
-                  ? 'inset 0 0 0 2px var(--cth-ink-900)'
-                  : 'inset 0 0 0 1px var(--cth-ink-700)',
+                  ? 'inset 0 0 0 1px var(--cth-sky)'
+                  : 'inset 0 0 0 1px var(--cth-ink-100)',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                fontWeight: centerView === v ? 600 : 400,
                 color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none',
                 textTransform: 'capitalize'
               }}
