@@ -790,7 +790,7 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // env only; Claude Code also gets prompt/settings hook args.
   if (opts.hive && teamHive.enabled()) {
     if (claudeProvider) {
-      try { teamHive.assertLoggedIn(); }
+      try { teamHive.assertLoggedIn(!!opts.hive.isGod); }
       catch (e) { return { ok: false, error: (e as Error).message }; }
     }
     try {

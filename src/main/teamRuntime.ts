@@ -135,9 +135,10 @@ export class TeamRuntime {
         const agent = this.hive.registry().agents[agentId];
         if (!agent) return null;
         const root = this.hive.root();
-        // RES-4: workers write transcripts under <agentDir>/.cchome; god uses ~./claude.
+        // Workers share this team's auth home (<root>/.agenthome), so their
+        // transcripts land under <root>/.agenthome/projects; the god uses ~/.claude.
         const claudeHome = !agent.isGod && root
-          ? join(root, 'agents', agentId, '.cchome')
+          ? join(root, '.agenthome')
           : undefined;
         return { cwd: agent.cwd, claudeHome };
       }
