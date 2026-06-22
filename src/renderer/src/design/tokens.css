@@ -71,8 +71,30 @@
   --cth-lh-body-sm:    18px;
   --cth-lh-mono:       20px;
 
+  /* Danger — true red, distinct from the indigo primary accent.
+     (Previously destructive UI reused --cth-coral, which now maps to indigo
+     and so was indistinguishable from a primary button.) */
+  --cth-danger:       #EF4444;
+  --cth-danger-light: #FECACA;
+
+  /* Corner radius — modern rounded geometry (replaces the old pixel 0–2px) */
+  --cth-radius-sm:   6px;
+  --cth-radius-md:   8px;
+  --cth-radius-lg:   12px;
+  --cth-radius-pill: 999px;
+
+  /* Motion — one shared easing + durations so transitions feel consistent */
+  --cth-ease:     cubic-bezier(0.2, 0, 0, 1);
+  --cth-dur-fast: 120ms;
+  --cth-dur:      160ms;
+
   /* Soft elevation shadow — subtle blur, replaces the hard no-blur offset */
   --cth-shadow-hard: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.06);
+
+  /* Layered elevation scale — sm rests, md lifts on hover, lg for overlays */
+  --cth-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --cth-shadow-md: 0 2px 4px rgba(16, 24, 40, 0.06), 0 6px 16px rgba(16, 24, 40, 0.10);
+  --cth-shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.14), 0 2px 6px rgba(16, 24, 40, 0.08);
 
   /* Panel border package — soft 1px hairline borders (kept the three names/APIs).
      The multi-layer "chunky" insets become a single clean 1px border. */

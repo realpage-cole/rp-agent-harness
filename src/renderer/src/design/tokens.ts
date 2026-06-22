@@ -33,6 +33,11 @@ export const colors = {
     peach: 0xf97316,
     peachLight: 0xfed7aa
   },
+  // True red for destructive UI — distinct from the indigo primary accent.
+  danger: {
+    base: 0xef4444,
+    light: 0xfecaca
+  },
   status: {
     idle: 0xaab1ba,
     thinking: 0x0ea5e9,

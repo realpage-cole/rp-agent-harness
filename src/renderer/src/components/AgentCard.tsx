@@ -61,10 +61,10 @@ export function AgentCard({
             position: 'absolute', right: -4, bottom: -5, zIndex: 2,
             width: 22, height: 20,
             background: 'var(--cth-sky)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900), 2px 2px 0 rgba(26,19,32,0.25)',
-            transform: 'rotate(4deg)',
+            borderRadius: 'var(--cth-radius-sm)',
+            boxShadow: 'var(--cth-shadow-sm)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)',
+            fontFamily: 'var(--cth-font-display)', fontSize: 9, fontWeight: 600, color: 'var(--cth-cream-50)',
             cursor: 'pointer'
           }}
         >
@@ -139,8 +139,9 @@ export function AgentCard({
               {isGod && (
                 <span style={{
                   fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
+                  fontWeight: 700, letterSpacing: '0.06em',
                   background: `var(--cth-${accent})`, color: 'var(--cth-ink-900)',
-                  padding: '1px 5px 0', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)', flexShrink: 0
+                  padding: '2px 6px', borderRadius: 'var(--cth-radius-pill)', flexShrink: 0
                 }}>GOD</span>
               )}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{project}</span>
@@ -171,11 +172,12 @@ export function AgentCard({
             >
               {Array.from({ length: 8 }).map((_, i) => (
                 <div key={i} style={{
-                  width: 14, height: 6,
+                  width: 14, height: 5,
+                  borderRadius: 'var(--cth-radius-pill)',
+                  transition: 'background var(--cth-dur) var(--cth-ease)',
                   background: i < progress
-                    ? (progress >= 7 ? 'var(--cth-coral)' : progress >= 6 ? 'var(--cth-lemon)' : `var(--cth-${accent})`)
-                    : 'var(--cth-cream-200)',
-                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+                    ? (progress >= 7 ? 'var(--cth-danger)' : progress >= 6 ? 'var(--cth-lemon)' : `var(--cth-${accent})`)
+                    : 'var(--cth-cream-300)'
                 }}/>
               ))}
             </div>

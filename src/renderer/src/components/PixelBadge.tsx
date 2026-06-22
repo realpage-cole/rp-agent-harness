@@ -47,23 +47,28 @@ export function PixelBadge({ status, label, style }: PixelBadgeProps) {
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
-        padding: '2px 8px 0',
-        background: 'var(--cth-cream-100)',
+        padding: '2px 9px',
+        background: 'var(--cth-cream-50)',
         boxShadow: `inset 0 0 0 1px ${colorByStatus[status]}`,
+        borderRadius: 'var(--cth-radius-pill)',
         fontFamily: 'var(--cth-font-ui)',
         fontSize: 'var(--cth-text-body-sm)',
-        lineHeight: '18px',
-        color: 'var(--cth-ink-900)',
+        fontWeight: 500,
+        lineHeight: '16px',
+        color: 'var(--cth-ink-700)',
         userSelect: 'none',
         ...style
       }}
     >
       <span
         style={{
-          width: 8,
-          height: 8,
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          flexShrink: 0,
           background: colorByStatus[status],
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+          // Soft halo instead of a hard ink outline — reads as a status light.
+          boxShadow: `0 0 0 2px color-mix(in srgb, ${colorByStatus[status]} 22%, transparent)`
         }}
       />
       {text}

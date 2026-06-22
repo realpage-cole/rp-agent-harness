@@ -158,9 +158,10 @@ export function App() {
       <div
         className="cth-titlebar-drag"
         style={{
-          height: 36, minHeight: 36,
-          background: 'linear-gradient(180deg, var(--cth-cream-100) 0%, var(--cth-cream-200) 100%)',
-          borderBottom: '2px solid var(--cth-ink-900)',
+          height: 38, minHeight: 38,
+          background: 'linear-gradient(180deg, var(--cth-cream-50) 0%, var(--cth-cream-100) 100%)',
+          borderBottom: '1px solid var(--cth-ink-100)',
+          boxShadow: '0 1px 2px rgba(16,24,40,0.04)',
           display: 'flex',
           alignItems: 'center',
           paddingLeft: 96,
@@ -173,7 +174,7 @@ export function App() {
           fontFamily: 'var(--cth-font-display)',
           fontSize: 14,
           fontWeight: 700,
-          letterSpacing: '0.04em',
+          letterSpacing: '0.02em',
           color: 'var(--cth-ink-900)',
           display: 'block'
         }}>
@@ -196,9 +197,9 @@ export function App() {
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             width: 28, height: 28, padding: 0,
             background: 'var(--cth-paper-100)',
-            boxShadow: 'inset 0 0 0 1.5px var(--cth-ink-900)',
-            border: 'none', borderRadius: 2, cursor: 'pointer',
-            color: 'var(--cth-ink-900)'
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
+            border: 'none', borderRadius: 'var(--cth-radius-md)', cursor: 'pointer',
+            color: 'var(--cth-ink-700)'
           }}
         >
           <Icon name="gear" size={1} style={{ width: 18, height: 18 }} />

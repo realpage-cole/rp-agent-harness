@@ -41,17 +41,21 @@ export function PixelPanel({
   const baseStyle: CSSProperties = {
     background: fillByVariant[variant],
     boxShadow: borderByVariant[variant],
+    borderRadius: 'var(--cth-radius-lg)',
     padding: noPadding ? 0 : 'var(--cth-space-3)',
     position: 'relative',
+    // Only titled panels clip — so the negative-margin header follows the
+    // rounded corners. Untitled panels stay un-clipped so terminals, menus, and
+    // popovers can overflow as before. A caller-supplied `overflow` still wins.
+    ...(title ? { overflow: 'hidden' } : {}),
     ...style
   };
 
-  // Active variant: paint accent over the middle border slot (3px ring at 1px inset)
+  // Active variant: a clean 1.5px accent ring plus a soft accent glow — replaces
+  // the old chunky ink/accent/ink triple inset so selection reads as a modern
+  // highlight rather than a heavy pixel frame.
   if (variant === 'active' && accent) {
-    baseStyle.boxShadow = `
-      inset 0 0 0 1px var(--cth-ink-700),
-      inset 0 0 0 3px var(--cth-${accent}),
-      inset 0 0 0 5px var(--cth-ink-900)`;
+    baseStyle.boxShadow = `inset 0 0 0 1.5px var(--cth-${accent}), 0 0 0 3px var(--cth-${accent}-light), var(--cth-shadow-sm)`;
   }
 
   return (
@@ -60,13 +64,14 @@ export function PixelPanel({
         <div
           style={{
             margin: noPadding ? 0 : '-12px -12px 12px',
-            padding: '6px 12px 4px',
+            padding: '7px 12px 6px',
             background: accent ? `var(--cth-${accent})` : 'var(--cth-cream-200)',
             color: 'var(--cth-ink-900)',
             fontFamily: 'var(--cth-font-display)',
             fontSize: 'var(--cth-text-display-md)',
+            fontWeight: 600,
             lineHeight: 'var(--cth-lh-display-md)',
-            boxShadow: 'inset 0 -1px 0 var(--cth-ink-900)'
+            boxShadow: 'inset 0 -1px 0 var(--cth-ink-100)'
           }}
         >
           {title}
