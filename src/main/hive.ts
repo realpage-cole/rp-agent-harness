@@ -1088,6 +1088,50 @@ export class HiveManager {
     this.commit(`hive: tasks (${tasks.length})`);
   }
 
+  /**
+   * Clear this team's WORK HISTORY — the "what's been worked on" surface — while
+   * keeping the roster, every agent's long-term memory, and the cost ledger
+   * intact. Resets the task ledger, the shared board, the team pulse, and the
+   * activity log back to their freshly-seeded state, then commits once. Each
+   * step is independent + best-effort so a single failure can't leave the team
+   * half-cleared. Returns {ok} so the IPC layer never throws.
+   *
+   * Deliberately does NOT touch: registry.json (agents), agents/<id>/memory.md
+   * (recall), or cost-ledger.jsonl (spend) — see the operator's chosen scope.
+   */
+  clearWorkHistory(): { ok: boolean; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
+    try {
+      this.ensureHive();
+      this.writeJson(join(root, 'tasks.json'), { tasks: [] });
+      writeFileSync(
+        join(root, 'board.md'),
+        '# Hive board\n\n_Shared plans live here. The god agent is the scribe._\n',
+        'utf8'
+      );
+      writeFileSync(
+        join(root, 'pulse.md'),
+        '_No pulse yet — the orchestrator updates this each standup._\n',
+        'utf8'
+      );
+      writeFileSync(join(root, 'log.jsonl'), '', 'utf8');
+      // Bump the board LWW stamp so the next sync beat pushes the cleared board
+      // (otherwise a teammate's stale board could merge back over the reset).
+      try {
+        const reg = this.registry();
+        const hash = createHash('sha1').update('').digest('hex');
+        reg.meta = { ...(reg.meta ?? {}), boardUpdatedAt: Date.now(), boardHash: hash };
+        this.atomicWriteJson(join(root, 'registry.json'), reg);
+      } catch { /* best-effort — board still cleared on disk */ }
+      this.appendLog({ kind: 'clear-history' });
+      this.commit('hive: clear work history');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   /** Content fingerprint of a task EXCLUDING its sync stamps, so re-stamping is
    *  driven purely by real edits (not by the stamp itself changing). */
   private taskContentHash(t: HiveTask): string {

@@ -7,7 +7,6 @@ import { DashboardView } from '@/components/dashboard/DashboardView';
 import { useHive } from '@/hooks/useHive';
 import { MemoryPanel } from '@/components/MemoryPanel';
 import { AgentDetailPanel } from '@/components/AgentDetailPanel';
-import { AgentStrip } from '@/components/AgentStrip';
 import { AddAgentModal } from '@/components/AddAgentModal';
 import { BootSplash } from '@/components/BootSplash';
 import { OnboardingWizard } from '@/components/OnboardingWizard';
@@ -61,6 +60,10 @@ export function App() {
       if (ev.kind === 'created') useStore.getState().upsertTeam(ev.summary);
       else if (ev.kind === 'status') {
         useStore.getState().upsertTeam({ id: ev.teamId, running: ev.running, agentCount: ev.agentCount });
+      } else if (ev.kind === 'removed') {
+        // Drop the deleted team; the store falls back to the default/first team
+        // and switches the dashboard there if it was the active one.
+        useStore.getState().removeTeam(ev.teamId);
       }
     });
     return () => { cancelled = true; off(); };
@@ -278,7 +281,7 @@ export function App() {
                 color: 'var(--cth-ink-500)'
               }}>NO AGENT SELECTED</div>
               <p style={{ margin: 0, fontSize: 14, textAlign: 'center', color: 'var(--cth-ink-700)' }}>
-                Spawn an agent from the strip below.<br />
+                Add an agent from the Team panel.<br />
                 The terminal and command bar will land here.
               </p>
               <PixelButton variant="secondary" size="md" onClick={() => setAddAgentOpen(true)}>
@@ -290,8 +293,6 @@ export function App() {
           )}
         </div>
       </div>
-
-      <AgentStrip config={config} />
 
       {addAgentOpen && (
         <AddAgentModal onClose={() => setAddAgentOpen(false)} config={config} />

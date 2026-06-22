@@ -236,6 +236,45 @@ async function cloneTeam(sourceTeamId: string, newName: string): Promise<CloneTe
   }
 }
 
+/**
+ * Delete a team — the inverse of cloneTeam. Refuses the default team (it's the
+ * permanent base; `app:resetAll` is the way to wipe that). Kills every live PTY
+ * the team owns (each teardown archives its agent + removes its worktree), stops
+ * the team's background services, de-registers it from config + the runtime Map,
+ * removes its on-disk subtree (teams/<id>, including the copied API keys), and
+ * tells the renderer to drop + switch away. Best-effort per step so a single
+ * failure can't strand the team half-removed. Returns {ok} for the IPC layer.
+ */
+function removeTeamRuntime(teamId: string): { ok: boolean; error?: string } {
+  if (teamId === DEFAULT_TEAM_ID) return { ok: false, error: 'The default team cannot be deleted.' };
+  if (!getTeam(teamId)) return { ok: false, error: 'No such team.' };
+  const home = readConfig().harnessHome;
+  try {
+    // 1) Kill this team's live PTYs (teardownPty archives + cleans each worktree).
+    for (const [ptyId, owner] of [...ptyToAgent]) {
+      if (owner.teamId !== teamId) continue;
+      try { ptyManager.kill(ptyId); } catch { /* already gone */ }
+      teardownPty(ptyId);
+    }
+    // 2) Stop the team's services + timers, then de-register the runtime.
+    const runtime = teams.get(teamId);
+    if (runtime) { try { runtime.stop(); } catch (e) { console.error('[removeTeam] runtime.stop:', e); } }
+    teams.delete(teamId);
+    // 3) Drop it from persisted config so it won't auto-start next boot.
+    try { removeTeam(teamId); } catch (e) { console.error('[removeTeam] config removeTeam:', e); }
+    // 4) Erase the team's on-disk subtree (NO-MOVE clones live under teams/<id>,
+    //    including their copied API keys) — mirrors the clone rollback + resetAll.
+    if (home) {
+      try { rmSync(teamHome(home, teamId), { recursive: true, force: true }); }
+      catch (e) { console.error('[removeTeam] rm dir:', e); }
+    }
+    emitTeamsEvent({ kind: 'removed', teamId });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 /** When true, skip the quit interceptor (user already confirmed). */
@@ -1406,13 +1445,22 @@ ipcMain.handle('missions:save', (_evt, missions: unknown, teamId?: unknown) => {
   return { ok: true };
 });
 
-// ─── IPC: teams (multi-team — list / clone / lifecycle events) ──────────────
-// teams:remove is intentionally OUT of v1 (no removal surface).
+// ─── IPC: teams (multi-team — list / clone / remove / lifecycle events) ─────
 ipcMain.handle('teams:list', (): TeamSummary[] => teamSummaries());
 ipcMain.handle('teams:clone', async (_evt, sourceTeamId: unknown, newName: unknown): Promise<CloneTeamResult> => {
   if (typeof newName !== 'string' || !newName.trim()) return { ok: false, error: 'A team name is required.' };
   return cloneTeam(typeof sourceTeamId === 'string' ? sourceTeamId : DEFAULT_TEAM_ID, newName.trim());
 });
+// Delete a team entirely (non-default only). Stops + de-registers it, kills its
+// PTYs, and erases its on-disk subtree; emits a `teams:event` 'removed'.
+ipcMain.handle('teams:remove', (_evt, teamId: unknown): { ok: boolean; error?: string } => {
+  if (typeof teamId !== 'string' || !teamId) return { ok: false, error: 'A team id is required.' };
+  return removeTeamRuntime(teamId);
+});
+
+// ─── IPC: clear a team's work history (tasks/board/pulse/log) ───────────────
+// Keeps the roster, agent memory, and cost ledger — see clearWorkHistory().
+ipcMain.handle('hive:clearHistory', (_evt, teamId?: unknown) => rt(teamId).hive.clearWorkHistory());
 
 // ─── IPC: full-text search across hive files (board, tasks, memory) ──────────
 ipcMain.handle('hive:textSearch', (_evt, query: unknown, teamId?: unknown) => {
