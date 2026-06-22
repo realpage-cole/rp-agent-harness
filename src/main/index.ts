@@ -168,18 +168,26 @@ async function cloneTeam(sourceTeamId: string, newName: string): Promise<CloneTe
     const runtime = new TeamRuntime(newId, teamDeps);
     runtime.hive.ensureHive();
 
-    // Copy the API key so the clone runs without re-entering it.
+    // Carry the source team's tooling manifest + provision script into the clone
+    // so its workers get the same per-agent MCP/plugins (hive.ts reads
+    // agent-tooling.json at spawn). We do NOT copy `.agenthome`: the enterprise
+    // session is per-home and keychain-bound to the original path, so a copied home
+    // would carry stale oauthAccount metadata that falsely passes assertLoggedIn.
+    // The clone's .agenthome must be logged in once (assertLoggedIn guides the user)
+    // and provisioned (bin/provision_agent_tools.py) before its workers run.
     try {
-      // N1 — resolve from source.teamId (not the raw arg): an unknown sourceTeamId
-      // falls back to defaultRuntime, so we copy the DEFAULT team's key rather than
-      // looking under a non-existent dir.
-      const srcKey = join(teamHome(home, source.teamId), 'hive', '.secrets', 'anthropic-api-key');
-      if (existsSync(srcKey)) {
-        const dstSecrets = join(teamHome(home, newId), 'hive', '.secrets');
-        mkdirSync(dstSecrets, { recursive: true });
-        cpSync(srcKey, join(dstSecrets, 'anthropic-api-key'));
+      const srcHive = source.hive.root();
+      const dstHive = runtime.hive.root();
+      if (srcHive && dstHive) {
+        const tooling = join(srcHive, 'agent-tooling.json');
+        if (existsSync(tooling)) cpSync(tooling, join(dstHive, 'agent-tooling.json'));
+        const provision = join(srcHive, 'bin', 'provision_agent_tools.py');
+        if (existsSync(provision)) {
+          mkdirSync(join(dstHive, 'bin'), { recursive: true });
+          cpSync(provision, join(dstHive, 'bin', 'provision_agent_tools.py'));
+        }
       }
-    } catch (e) { console.error('[clone] copy secret:', e); }
+    } catch (e) { console.error('[clone] copy tooling:', e); }
 
     // Copy CONFIGS from the source roster only. Strip the live-state fields
     // (status/lastSeen/archived/sessionId); ensureAgent re-stamps status idle /
@@ -790,7 +798,7 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // env only; Claude Code also gets prompt/settings hook args.
   if (opts.hive && teamHive.enabled()) {
     if (claudeProvider) {
-      try { teamHive.assertLoggedIn(); }
+      try { teamHive.assertLoggedIn(!!opts.hive.isGod); }
       catch (e) { return { ok: false, error: (e as Error).message }; }
     }
     try {
@@ -1696,7 +1704,28 @@ function bootstrapHiveServices(): void {
   for (const rt of teams.values()) rt.start();
 }
 
+/** One-time userData migration after the munder-difflin → hive rename. The app
+ *  name (and thus app.getPath('userData')) derives from package.json "name" (no
+ *  app.setName), so renaming moves the userData dir and would orphan config.json
+ *  (harnessHome pointer + team registrations). If the new dir has no config.json
+ *  but the old `munder-difflin` userData does, copy the old tree over. Idempotent:
+ *  once config.json exists in the new dir, this is a no-op. */
+function migrateUserData(): void {
+  try {
+    const dst = app.getPath('userData');
+    if (existsSync(join(dst, 'config.json'))) return; // already migrated, or a fresh install
+    const old = join(app.getPath('appData'), 'munder-difflin');
+    if (existsSync(join(old, 'config.json'))) {
+      cpSync(old, dst, { recursive: true });
+      console.log('[boot] migrated userData munder-difflin →', dst);
+    }
+  } catch (e) { console.error('[boot] userData migration:', e); }
+}
+
 app.whenReady().then(() => {
+  // FIRST: carry config/db across the munder-difflin → hive rename before anything
+  // reads userData (slackReplyConfigPath, persist.open, readConfig all live there).
+  migrateUserData();
   // Hand every spawned agent the path to the Slack reply discovery file via the
   // inherited env (pty merges process.env). The path is stable whether or not the
   // server is running; the FILE only exists while it is, so the helper degrades

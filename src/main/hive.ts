@@ -332,16 +332,22 @@ export class HiveManager {
   }
 
   /**
-   * Throw if the user has not run `claude login`. Call before spawning any agent
-   * so the UI can surface a clear message instead of letting agents spawn and fail
-   * silently with auth errors. Checks for the oauthAccount key in ~/.claude.json.
+   * Throw if the relevant Claude home isn't logged in, so the UI can surface a
+   * clear message instead of letting an agent spawn and silently fall back to the
+   * wrong auth. The god uses the shared `~/.claude`; workers use this team's shared
+   * auth home `<root>/.agenthome`. We detect "logged in" via the oauthAccount key.
    */
-  assertLoggedIn(): void {
+  assertLoggedIn(isGod: boolean): void {
+    const root = this.root();
+    const home = isGod || !root ? homedir() : join(root, '.agenthome');
     try {
-      const cfg = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8'));
+      const cfg = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
       if (cfg.oauthAccount) return;
     } catch { /* file missing → not logged in */ }
-    throw new Error('Not logged in to Claude Code. Run `claude login` in your terminal first.');
+    const where = isGod
+      ? 'Run `claude login` in your terminal first.'
+      : `Log this team's shared agent home in once:\n  CLAUDE_CONFIG_DIR="${home}" claude   (then /login)`;
+    throw new Error(`Claude Code is not logged in for ${isGod ? 'the orchestrator' : 'workers'}. ${where}`);
   }
 
   /**
@@ -454,32 +460,41 @@ export class HiveManager {
     const args: string[] = [];
     if (!claudeProvider) return { args, env };
 
-    // RES-4 — FULL per-agent tool isolation: each WORKER gets its own Claude config
-    // home so it only sees the MCP servers + plugins provisioned into it
-    // (hive/agent-tooling.json + hive/bin/provision_agent_tools.py). god is the
-    // orchestrator and intentionally keeps the shared home (full access).
+    // RES-4 (auth/tooling split) — every WORKER shares ONE logged-in auth home per
+    // team at `<root>/.agenthome` (a one-time interactive `claude /login` puts the
+    // enterprise session in the keychain), so all agents bill the enterprise seat
+    // like the god. A fresh isolated home can't reach that keychain session, so we
+    // do NOT isolate per agent anymore. Per-agent tool isolation moves to flags:
+    //   - MCP servers → a per-agent mcp.json + `--mcp-config --strict-mcp-config`
+    //   - plugins     → `enabledPlugins` in the per-agent `--settings` file
+    // (all plugins are installed once into the shared home). god keeps `~/.claude`.
+    let enabledPlugins: Record<string, boolean> | undefined;
     if (!meta.isGod) {
-      const cchome = join(dir, '.cchome');
-      mkdirSync(cchome, { recursive: true });
-      env.CLAUDE_CONFIG_DIR = cchome;
-      // Seed onboarding + workspace trust once so a fresh isolated home never prompts.
-      // Also forward the oauthAccount block from the shared ~/.claude.json so the
-      // worker's isolated home matches the keychain entry (token lives in the macOS
-      // keychain under service "Claude Code" / OS username — shared across all
-      // processes running as this user, so no token copy is needed).
-      const cfgJson = join(cchome, '.claude.json');
-      if (!existsSync(cfgJson)) {
-        let oauthAccount: unknown = undefined;
-        try {
-          const sharedCfg = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8'));
-          oauthAccount = sharedCfg.oauthAccount;
-        } catch { /* no shared config — worker will prompt for login */ }
-        this.writeJson(cfgJson, {
-          hasCompletedOnboarding: true,
-          projects: { [root]: { hasTrustDialogAccepted: true } },
-          mcpServers: {},
-          ...(oauthAccount ? { oauthAccount } : {})
-        });
+      const agentHome = join(root, '.agenthome');
+      env.CLAUDE_CONFIG_DIR = agentHome;
+      // Make sure the shared home trusts this agent's workspace so it never prompts.
+      this.trustDirs(agentHome, [root, meta.cwd].filter(Boolean));
+
+      const tooling = this.agentTooling(root);
+      const spec = tooling?.agents?.[meta.id];
+      // Per-agent MCP — write ONLY this agent's servers and lock claude to them
+      // (--strict-mcp-config ignores any servers in the shared home).
+      const mcpServers: Record<string, unknown> = {};
+      for (const name of spec?.mcp ?? []) {
+        const def = tooling?.mcpDefs?.[name];
+        if (def) mcpServers[name] = def;
+      }
+      const mcpPath = join(dir, 'mcp.json');
+      this.writeJson(mcpPath, { mcpServers });
+      args.push('--mcp-config', mcpPath, '--strict-mcp-config');
+      // Per-agent plugins — enable only this agent's; explicitly disable every other
+      // agent's (the shared home has the UNION installed) so isolation still holds.
+      const all = new Set<string>();
+      for (const a of Object.values(tooling?.agents ?? {})) for (const p of a.plugins ?? []) all.add(p);
+      if (all.size) {
+        enabledPlugins = {};
+        for (const p of all) enabledPlugins[p] = false;
+        for (const p of spec?.plugins ?? []) enabledPlugins[p] = true;
       }
     }
 
@@ -487,12 +502,14 @@ export class HiveManager {
 
     // Phase 1 — autonomy: attach lifecycle hooks via --settings (no edits to the
     // user's repo) so the agent reports activity and drains its inbox on Stop.
+    // Worker plugin enablement (enabledPlugins) rides in on the same file.
     const sock = this.sockPath();
     const shim = this.shimPath();
     if (sock && shim) {
       env.HIVE_SOCK = sock;
       const settingsPath = join(dir, 'settings.json');
-      this.writeJson(settingsPath, this.hookSettings(shim, opts.theme));
+      const settings = this.hookSettings(shim, opts.theme);
+      this.writeJson(settingsPath, enabledPlugins ? { ...settings, enabledPlugins } : settings);
       args.push('--settings', settingsPath);
     }
     return { args, env };
@@ -547,8 +564,44 @@ export class HiveManager {
     return this.registry().agents[agentId]?.sessionId;
   }
 
+  /** Per-agent tool manifest (`<root>/agent-tooling.json`): mcpDefs + per-agent
+   *  mcp/plugin lists. null when absent (e.g. a clone with no manifest yet). */
+  private agentTooling(root: string): {
+    mcpDefs?: Record<string, unknown>;
+    agents?: Record<string, { mcp?: string[]; plugins?: string[] }>;
+  } | null {
+    try {
+      return JSON.parse(readFileSync(join(root, 'agent-tooling.json'), 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Mark `dirs` as trust-accepted in the shared auth home's `.claude.json` so a
+   *  worker never hits a folder-trust prompt. Atomic + idempotent; only rewrites
+   *  when something is actually missing, to minimize churn on the shared file. */
+  private trustDirs(agentHome: string, dirs: string[]): void {
+    try {
+      mkdirSync(agentHome, { recursive: true });
+      const cfgPath = join(agentHome, '.claude.json');
+      const cfg = this.readJson<{ projects?: Record<string, { hasTrustDialogAccepted?: boolean }> }>(
+        cfgPath,
+        {}
+      );
+      cfg.projects ??= {};
+      let changed = false;
+      for (const d of dirs) {
+        if (!cfg.projects[d]?.hasTrustDialogAccepted) {
+          cfg.projects[d] = { ...cfg.projects[d], hasTrustDialogAccepted: true };
+          changed = true;
+        }
+      }
+      if (changed) this.atomicWriteJson(cfgPath, cfg);
+    } catch { /* best-effort: worst case is a one-time trust prompt */ }
+  }
+
   /** Claude Code settings that route every relevant hook through the shim. */
-  private hookSettings(shim: string, theme?: 'light' | 'dark'): unknown {
+  private hookSettings(shim: string, theme?: 'light' | 'dark'): Record<string, unknown> {
     const cmd = `node "${shim}"`;
     const entry = (matcher?: string) => ({
       ...(matcher ? { matcher } : {}),

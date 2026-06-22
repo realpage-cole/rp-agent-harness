@@ -1,5 +1,5 @@
 {
-  "name": "munder-difflin",
+  "name": "hive",
   "version": "0.2.3",
   "private": true,
   "description": "rp-agent-harness — an internal RealPage local Electron multi-agent harness for Claude Code: autonomous agents that message, route, and remember, coordinated by a god/orchestrator hive, with a modern dashboard UI and optional Supabase collaborative sync.",
