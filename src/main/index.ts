@@ -29,8 +29,6 @@ import { readAgentUsage, readContextTokens } from './transcript';
 import { traceDetails } from './traceDetail';
 import { costTotalsFromUsage } from './costTotals';
 import { listIssues, listCIRuns } from './github';
-import { SlackWebhookServer, SlackReplyServer, postSlackReply } from './slack';
-import { WebhookServer, type WebhookInbound, type WebhookTaskStatus } from './webhook';
 import { ClosingTimeController, type ClosingTimeEvent, type ClosingTimePhase } from './closingTime';
 import {
   inferAgentProvider,
@@ -97,9 +95,9 @@ defaultRuntime = new TeamRuntime(DEFAULT_TEAM_ID, teamDeps);
 const teams = new Map<string, TeamRuntime>([[DEFAULT_TEAM_ID, defaultRuntime]]);
 
 // Back-compat aliases for the GLOBAL-surface handlers that legitimately target
-// the default team: the Slack/webhook ingestors + the shared-memory/teammate
-// sync surface (one workspace UI, default-team scoped), plus bootstrap/reset/
-// pulse. Per-team data handlers route through rt(teamId) instead, so they don't
+// the default team: the shared-memory/teammate sync surface (one workspace UI,
+// default-team scoped), plus bootstrap/reset/pulse. Per-team data handlers route
+// through rt(teamId) instead, so they don't
 // alias. (BE-7.)
 const hive = defaultRuntime.hive;
 const syncManager = defaultRuntime.syncManager;
@@ -356,323 +354,6 @@ function syncKeepAwake(): void {
 function liveWebContents(): Electron.WebContents | null {
   const wc = mainWindow?.webContents;
   return wc && !wc.isDestroyed() ? wc : null;
-}
-
-// ─── Slack webhook server (Slack message → the orchestrator's queue) ─────────
-/** The running Slack ingestion server, or null when disabled/stopped. */
-let slackServer: SlackWebhookServer | null = null;
-/** The loopback-only reply endpoint (lets the bundled helper post back to Slack
- *  without ever seeing the bot token). Lifecycle is tied to `slackServer`. */
-let slackReplyServer: SlackReplyServer | null = null;
-/** Last public tunnel URL handed out — persisted so Settings can re-show the
- *  Request URL after a reopen (Slack reuses it until the server is stopped). */
-let lastSlackUrl: string | undefined;
-
-// ─── Slack done-notifier (Slack-origin task → done → one summary reply) ───────
-/** Polls the shared kanban (hive/tasks.json) for Slack-origin tasks that reach
- *  'done' and posts ONE summary reply into the originating thread. Lifecycle is
- *  tied to `slackServer`. OUTBOUND-only: it never touches inbound queue/lanes. */
-let slackDoneTimer: ReturnType<typeof setInterval> | null = null;
-/** Re-entrancy guard so a slow post can't overlap the next tick. */
-let slackDonePolling = false;
-/** Task ids already notified — exactly-once across re-reads AND restarts. Lazily
- *  loaded from / persisted to `slackDoneNotifiedPath()`. */
-let slackDoneNotified: Set<string> | null = null;
-/** Ids already 'done' when the observer started — baselined (never notified) so a
- *  summary only ever fires on a live …→done transition, not on pre-existing dones. */
-let slackDoneBaseline: Set<string> | null = null;
-
-/** Absolute path to the bundled `md-slack-reply.cjs` helper. Packaged: under
- *  `process.resourcesPath` (electron-builder extraResources). Dev: the repo's
- *  `resources/` dir, resolved from the app path. */
-function slackReplyScriptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, 'md-slack-reply.cjs')
-    : join(app.getAppPath(), 'resources', 'md-slack-reply.cjs');
-}
-
-/** Where the helper discovers `{ port, token }` for the loopback endpoint. Kept
- *  under userData (NOT the git repo, NOT embedded into the shared memory). */
-function slackReplyConfigPath(): string {
-  return join(app.getPath('userData'), 'slack-reply.json');
-}
-
-/** Ledger of task ids whose done-summary has already been posted. Ids ONLY — no
- *  secret ever lands here. Under userData (out of the repo, out of the index). */
-function slackDoneNotifiedPath(): string {
-  return join(app.getPath('userData'), 'slack-done-notified.json');
-}
-
-function loadSlackDoneNotified(): Set<string> {
-  try {
-    const arr = JSON.parse(readFileSync(slackDoneNotifiedPath(), 'utf8'));
-    if (Array.isArray(arr)) return new Set(arr.filter((x): x is string => typeof x === 'string'));
-  } catch { /* missing/corrupt → start empty */ }
-  return new Set();
-}
-
-function persistSlackDoneNotified(set: Set<string>): void {
-  try { writeFileSync(slackDoneNotifiedPath(), JSON.stringify([...set])); }
-  catch (e) { console.error('[slack] could not persist done-notify ledger:', e); }
-}
-
-/** The single in-thread summary for a finished task. Sourced from the task's
- *  result/description (falling back to the title), trimmed Slack-friendly. */
-function slackDoneSummary(task: HiveTask): string {
-  const body = (task.result ?? task.description ?? '').trim();
-  const head = `:white_check_mark: *Done:* ${task.title}`;
-  const text = body ? `${head}\n${body}` : head;
-  return text.length > 2800 ? `${text.slice(0, 2799)}…` : text;
-}
-
-/** One observation pass over the kanban. Posts a summary for any Slack-origin
- *  task that has newly reached 'done'. Best-effort and self-guarding — it must
- *  never throw into the timer, and the bot token never leaves this function. */
-async function pollSlackDoneTasks(): Promise<void> {
-  if (slackDonePolling) return;
-  const botToken = readConfig().slackBotToken;
-  if (!botToken) return; // can't post without the token — nothing to do
-  let tasks: HiveTask[];
-  try {
-    const ledger = hive.tasks() as { tasks?: HiveTask[] };
-    tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-  } catch { return; } // unreadable/missing tasks.json → skip this tick
-
-  const notified = slackDoneNotified ?? (slackDoneNotified = loadSlackDoneNotified());
-
-  // First tick seeds the baseline (ids already done) and posts nothing — so we
-  // only ever fire on a transition observed live this session.
-  if (slackDoneBaseline === null) {
-    slackDoneBaseline = new Set(tasks.filter((t) => t.status === 'done').map((t) => t.id));
-    return;
-  }
-  const baseline = slackDoneBaseline;
-
-  slackDonePolling = true;
-  try {
-    for (const t of tasks) {
-      if (t.status !== 'done') continue;
-      if (baseline.has(t.id) || notified.has(t.id)) continue; // already handled
-      const slack = t.slack;
-      if (!slack || !slack.channel || !slack.thread_ts) continue; // non-Slack-origin → leave alone
-      const res = await postSlackReply({
-        botToken, channel: slack.channel, thread_ts: slack.thread_ts, text: slackDoneSummary(t)
-      });
-      if (res.ok) {
-        notified.add(t.id);
-        persistSlackDoneNotified(notified); // mark-on-success → exactly one delivered reply
-      } else {
-        // Genuinely undelivered → leave unmarked so a later tick retries. Log
-        // the id + error only; never the token or message body.
-        console.error('[slack] done-summary post failed for task', t.id, '-', res.error);
-      }
-    }
-  } finally {
-    slackDonePolling = false;
-  }
-}
-
-/** Begin watching the kanban for Slack-origin done-transitions (idempotent). */
-function startSlackDoneObserver(): void {
-  if (slackDoneTimer) return;
-  slackDoneNotified = loadSlackDoneNotified();
-  slackDoneBaseline = null; // re-seed on the first tick of this session
-  slackDoneTimer = setInterval(() => { void pollSlackDoneTasks(); }, 5000);
-}
-
-/** Stop watching the kanban. Safe to call when not running. */
-function stopSlackDoneObserver(): void {
-  if (slackDoneTimer) { clearInterval(slackDoneTimer); slackDoneTimer = null; }
-  slackDoneBaseline = null;
-}
-
-/** Build a SlackWebhookServer from the current config and start it, replacing
- *  any running instance, and return the start result (incl. the public tunnel
- *  URL the user pastes into Slack). No-op + error result when the integration is
- *  disabled or the signing secret is unset. */
-async function startSlackServer(): Promise<{ ok: boolean; url?: string; error?: string }> {
-  const cfg = readConfig();
-  if (!cfg.slackEnabled || !cfg.slackSigningSecret) {
-    return { ok: false, error: 'slack disabled or missing signing secret' };
-  }
-  slackServer?.stop();
-  slackServer = new SlackWebhookServer({
-    port: cfg.slackPort && cfg.slackPort > 0 ? cfg.slackPort : 3847,
-    signingSecret: cfg.slackSigningSecret,
-    channelId: cfg.slackChannelId,
-    // Fires from the HTTP server's event loop (not the IPC thread); route through
-    // liveWebContents() so a message arriving during window teardown can't throw.
-    // Forwards the full thread metadata so the renderer can ack + reply in-thread.
-    onMessage: (m) => {
-      try { liveWebContents()?.send('slack:incomingMessage', m); }
-      catch { /* window torn down */ }
-    }
-  });
-  const res = await slackServer.start();
-  // ok:false means we never bound the port → drop the instance. ok:true with no
-  // url just means the tunnel is unavailable; the local handler is still live.
-  if (!res.ok) { slackServer = null; return res; }
-  if (res.url) lastSlackUrl = res.url;
-  // Bring up the loopback reply endpoint (token-gated, never tunneled) and drop
-  // the discovery file for the bundled helper. Best-effort: reply path being
-  // unavailable must not sink ingestion.
-  await startSlackReplyServer();
-  // Begin watching the kanban for Slack-origin tasks that reach 'done', to post
-  // their one summary reply in-thread. OUTBOUND-only; never touches ingestion.
-  startSlackDoneObserver();
-  return res;
-}
-
-/** Start the loopback reply endpoint and write its `{ port, token }` to userData
- *  so `md-slack-reply.cjs` can reach it. The bot token is read lazily from config
- *  at reply time and never written to this file. */
-async function startSlackReplyServer(): Promise<void> {
-  slackReplyServer?.stop();
-  const token = randomBytes(24).toString('hex');
-  slackReplyServer = new SlackReplyServer({
-    token,
-    getBotToken: () => readConfig().slackBotToken
-  });
-  const r = await slackReplyServer.start();
-  if (!r.ok || r.port === undefined) {
-    console.error('[slack] reply endpoint failed to start:', r.error);
-    slackReplyServer = null;
-    return;
-  }
-  try {
-    writeFileSync(slackReplyConfigPath(), JSON.stringify({ port: r.port, token }), { mode: 0o600 });
-  } catch (e) {
-    console.error('[slack] could not write reply config:', e);
-  }
-}
-
-/** Stop and forget the Slack server (+ reply endpoint). Best-effort; safe to call
- *  when not running. The last tunnel URL is retained so Settings keeps showing it. */
-function stopSlackServer(): void {
-  try { slackServer?.stop(); } catch (e) { console.error('[slack] stop failed:', e); }
-  slackServer = null;
-  try { slackReplyServer?.stop(); } catch (e) { console.error('[slack] reply stop failed:', e); }
-  slackReplyServer = null;
-  stopSlackDoneObserver();
-  try { if (existsSync(slackReplyConfigPath())) unlinkSync(slackReplyConfigPath()); } catch { /* noop */ }
-}
-
-// ─── Generic inbound webhook + status API ────────────────────────────────────
-/** The running generic-webhook server, or null when disabled/stopped. A PUBLIC
- *  (tunnel-forwarded) surface — secret-gated, unlike the loopback /reply. */
-let webhookServer: WebhookServer | null = null;
-/** Last public tunnel URL handed out — persisted so Settings can re-show the
- *  endpoint after a reopen (loca.lt rotates it per restart). */
-let lastWebhookUrl: string | undefined;
-
-/** SHA-256 hex of a capability token. The raw token is returned to the caller
- *  exactly once (the POST response) and never persisted; only this digest lands
- *  on the kanban card, so a GET can match without the raw token ever resting. */
-function hashWebhookToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
-
-/** Turn a verified webhook POST into hive work: create ONE stamped kanban card
- *  (origin + token hash) and route the message to god/the orchestrator's inbox as a
- *  request. Returns the raw capability token + card id to hand back to the caller
- *  (the ONLY echo of the token). The secret never reaches here. Returns null only
- *  if the card — the thing the caller will poll — could not be created. */
-function handleWebhookMessage(msg: WebhookInbound): { token: string; taskId: string } | null {
-  // 192-bit unguessable token, returned once; only its hash is stored.
-  const token = randomBytes(24).toString('hex');
-  const taskId = `webhook-${randomBytes(8).toString('hex')}`;
-  const full = msg.title ?? msg.message;
-  const title = full.length > 80 ? `${full.slice(0, 79)}…` : full;
-
-  // 1) Create the stamped card. This is the critical step — the caller's token is
-  //    only useful if a card exists to poll, so a failure here fails the POST.
-  try {
-    const ledger = hive.tasks() as { tasks?: HiveTask[] };
-    const existing = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    const card: HiveTask = {
-      id: taskId,
-      title,
-      description: msg.message,
-      status: 'todo',
-      dependsOn: [],
-      priority: 1,
-      createdAt: new Date().toISOString(),
-      webhook: { tokenHash: hashWebhookToken(token) }
-    };
-    hive.writeTasks([...existing, card]);
-  } catch (e) {
-    console.error('[webhook] could not create task card:', e instanceof Error ? e.message : e);
-    return null;
-  }
-
-  // 2) Route the work to god/the orchestrator (god inbox request). Body carries ONLY the
-  //    user message + the card id (so whoever finishes it updates that card's
-  //    status/result for the caller's GET) — never the secret or the raw token.
-  //    Best-effort: the card already exists and is pollable even if this hiccups.
-  try {
-    hive.send({
-      to: 'god',
-      act: 'request',
-      subject: `[webhook] ${title}`,
-      body: `${msg.message}\n\n(Inbound via the generic webhook API, tracked as kanban card ${taskId}. When this work is finished, set that card's status to 'done' and fill its 'result' so the caller's status check reflects the outcome.)`,
-      requires_reply: false
-    }, 'webhook');
-  } catch (e) {
-    console.error('[webhook] could not route to god:', e instanceof Error ? e.message : e);
-  }
-  return { token, taskId };
-}
-
-/** Resolve a capability token to its task's public status — scoped to the ONE
- *  card whose stored hash matches; never lists or leaks any other task. Returns
- *  null for any non-match (the server answers 404 either way, so a probe can't
- *  tell "unknown" from "malformed"). */
-function lookupWebhookStatus(token: string): WebhookTaskStatus | null {
-  const wanted = Buffer.from(hashWebhookToken(token));
-  let tasks: HiveTask[];
-  try {
-    const ledger = hive.tasks() as { tasks?: HiveTask[] };
-    tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-  } catch { return null; }
-  for (const t of tasks) {
-    const h = t.webhook?.tokenHash;
-    if (!h) continue;
-    const have = Buffer.from(h);
-    // Both are fixed-length sha-256 hex; compare in constant time defensively.
-    if (have.length === wanted.length && timingSafeEqual(have, wanted)) {
-      return { status: t.status, title: t.title, result: t.result };
-    }
-  }
-  return null;
-}
-
-/** Build a WebhookServer from the current config and start it, replacing any
- *  running instance. No-op + error when disabled or the secret is unset. The
- *  public tunnel is opened only here — never on a default; it stays opt-in
- *  (user enables + presses Start in Settings). */
-async function startWebhookServer(): Promise<{ ok: boolean; url?: string; error?: string }> {
-  const cfg = readConfig();
-  if (!cfg.webhookEnabled || !cfg.webhookSecret) {
-    return { ok: false, error: 'webhook disabled or missing secret' };
-  }
-  webhookServer?.stop();
-  webhookServer = new WebhookServer({
-    port: cfg.webhookPort && cfg.webhookPort > 0 ? cfg.webhookPort : 3849,
-    secret: cfg.webhookSecret,
-    onMessage: handleWebhookMessage,
-    lookupStatus: lookupWebhookStatus
-  });
-  const res = await webhookServer.start();
-  if (!res.ok) { webhookServer = null; return res; }
-  if (res.url) lastWebhookUrl = res.url;
-  return res;
-}
-
-/** Stop and forget the webhook server. Best-effort; safe when not running. The
- *  last tunnel URL is retained so Settings keeps showing it. */
-function stopWebhookServer(): void {
-  try { webhookServer?.stop(); } catch (e) { console.error('[webhook] stop failed:', e); }
-  webhookServer = null;
 }
 
 /** The persisted main-window geometry (kv key `window.bounds`). */
@@ -1005,8 +686,6 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // Stop every team's services (router, hooks, telemetry, sync, reflector,
   // thoughts, mission scheduler, beats), then the GLOBAL servers/probe.
   for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[changeHome] runtime.stop:', e); } }
-  try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
-  try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
 
   if (mode === 'move' && oldHome) {
@@ -1027,9 +706,6 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
       // Copy failed: recover IN PLACE against the unchanged old home (config never
       // repointed) so the user loses nothing, and surface the error — no relaunch.
       bootstrapHiveServices();
-      const cfg = readConfig();
-      if (cfg.slackEnabled && cfg.slackSigningSecret) void startSlackServer();
-      if (cfg.webhookEnabled && cfg.webhookSecret) void startWebhookServer();
       return { ok: false, error: `Could not copy data: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
@@ -1209,7 +885,6 @@ function teardownAndQuit(): void {
   // half-torn-down socket) must never abort the quit or pop a crash dialog.
   // Stop every team's services, then the GLOBAL servers/probe/store + PTYs.
   for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[quit] runtime.stop:', e); } }
-  try { stopSlackServer(); } catch (e) { console.error('[quit] slack.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[quit] memory.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
@@ -1326,7 +1001,6 @@ ipcMain.handle('app:resetAll', () => {
   // Tear everything down first so nothing writes back into the dirs we wipe.
   // Stop every team's services, then the GLOBAL servers/probe/store + PTYs.
   for (const rt of teams.values()) { try { rt.stop(); } catch (e) { console.error('[reset] runtime.stop:', e); } }
-  try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
@@ -1509,46 +1183,6 @@ ipcMain.handle('github:ciRuns', (_evt, cwd: unknown) =>
 // ─── IPC: desktop notifications toggle ──────────────────────────────────────
 ipcMain.handle('app:setNotifications', (_evt, val) => writeConfig({ notifications: val === true }));
 
-// ─── IPC: Slack integration ─────────────────────────────────────────────────
-ipcMain.handle('slack:start', () => startSlackServer());
-ipcMain.handle('slack:stop', () => { stopSlackServer(); return { ok: true }; });
-/** Current connection state + last Request URL — lets Settings hydrate the
- *  "Connected" badge and re-show the persisted tunnel URL on reopen. */
-ipcMain.handle('slack:status', () => ({ running: slackServer != null, url: lastSlackUrl }));
-/** Absolute path to the bundled reply helper, for the prompt the office worker
- *  runs to post its summary back in-thread. No secret crosses this boundary. */
-ipcMain.handle('slack:replyScriptPath', () => slackReplyScriptPath());
-/** Renderer's immediate "queued" ack into the triggering Slack thread. The bot
- *  token stays in main — only channel/thread/text cross IPC. */
-ipcMain.handle('slack:reply', (_evt, arg: unknown) => {
-  const p = (arg ?? {}) as { channel?: unknown; thread_ts?: unknown; text?: unknown };
-  const botToken = readConfig().slackBotToken;
-  if (!botToken) return { ok: false, error: 'no bot token' };
-  if (typeof p.channel !== 'string' || typeof p.thread_ts !== 'string' || typeof p.text !== 'string') {
-    return { ok: false, error: 'channel, thread_ts, text required' };
-  }
-  return postSlackReply({ botToken, channel: p.channel, thread_ts: p.thread_ts, text: p.text });
-});
-ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
-  const p = (patch ?? {}) as {
-    signingSecret?: unknown; botToken?: unknown; channelId?: unknown; port?: unknown; enabled?: unknown;
-  };
-  const next: Partial<HarnessConfig> = {};
-  // Trim string fields; an emptied field clears back to undefined.
-  if (typeof p.signingSecret === 'string') next.slackSigningSecret = p.signingSecret.trim() || undefined;
-  if (typeof p.botToken === 'string') next.slackBotToken = p.botToken.trim() || undefined;
-  if (typeof p.channelId === 'string') next.slackChannelId = p.channelId.trim() || undefined;
-  if (typeof p.port === 'number' && Number.isFinite(p.port)) next.slackPort = p.port;
-  if (typeof p.enabled === 'boolean') next.slackEnabled = p.enabled;
-  writeConfig(next);
-  // Reconcile the running server: disabling (or clearing the secret) stops it. We
-  // deliberately do NOT auto-(re)start here — the user presses Start in Settings
-  // to fetch the fresh (ephemeral) tunnel URL.
-  const cfg = readConfig();
-  if (!cfg.slackEnabled || !cfg.slackSigningSecret) stopSlackServer();
-  return { ok: true };
-});
-
 /** Adopt a workspace id as `syncWorkspaceId` and reconcile the running client:
  *  (re)start when enabled + fully configured (which now includes the workspace
  *  id and a signed-in user, gated inside the manager), else stop. Returns the
@@ -1709,32 +1343,6 @@ ipcMain.handle('notepad:addBoardEntry', (_evt, input: unknown) => {
 ipcMain.handle('notepad:removeBoardEntry', (_evt, id: unknown) =>
   typeof id === 'string' ? syncManager.removeBoardEntry(id) : Promise.resolve({ ok: false }));
 
-// ─── IPC: Generic webhook + status API ──────────────────────────────────────
-ipcMain.handle('webhook:start', () => startWebhookServer());
-ipcMain.handle('webhook:stop', () => { stopWebhookServer(); return { ok: true }; });
-/** Current state + last public endpoint URL, for the Settings badge/URL field. */
-ipcMain.handle('webhook:status', () => ({ running: webhookServer != null, url: lastWebhookUrl }));
-/** Mint a strong (256-bit) secret, persist it, and return it so Settings can show
- *  it for the user to copy into their client. The previous secret is replaced. */
-ipcMain.handle('webhook:generateSecret', () => {
-  const secret = randomBytes(32).toString('hex');
-  writeConfig({ webhookSecret: secret });
-  return { ok: true, secret };
-});
-ipcMain.handle('webhook:setConfig', (_evt, patch: unknown) => {
-  const p = (patch ?? {}) as { secret?: unknown; port?: unknown; enabled?: unknown };
-  const next: Partial<HarnessConfig> = {};
-  if (typeof p.secret === 'string') next.webhookSecret = p.secret.trim() || undefined;
-  if (typeof p.port === 'number' && Number.isFinite(p.port)) next.webhookPort = p.port;
-  if (typeof p.enabled === 'boolean') next.webhookEnabled = p.enabled;
-  writeConfig(next);
-  // Disabling (or clearing the secret) stops the public surface immediately. As
-  // with Slack we do NOT auto-(re)start — the user presses Start to open the
-  // tunnel and fetch the fresh endpoint URL.
-  const cfg = readConfig();
-  if (!cfg.webhookEnabled || !cfg.webhookSecret) stopWebhookServer();
-  return { ok: true };
-});
 
 /** Start every team's background services against the current harnessHome.
  *  Called on boot, and again to recover in place if a folder-change copy fails
@@ -1779,13 +1387,8 @@ function migrateUserData(): void {
 
 app.whenReady().then(() => {
   // FIRST: carry config/db across the munder-difflin → hive rename before anything
-  // reads userData (slackReplyConfigPath, persist.open, readConfig all live there).
+  // reads userData (persist.open, readConfig all live there).
   migrateUserData();
-  // Hand every spawned agent the path to the Slack reply discovery file via the
-  // inherited env (pty merges process.env). The path is stable whether or not the
-  // server is running; the FILE only exists while it is, so the helper degrades
-  // to "endpoint not running" cleanly. NO secret is in the env — only the path.
-  process.env.MD_SLACK_REPLY_CONFIG = slackReplyConfigPath();
   // Open the durable store first — createWindow() reads the saved window bounds.
   // Guarded: a DB failure (e.g. a bad native build) must degrade to defaults,
   // never block app startup.
@@ -1795,24 +1398,6 @@ app.whenReady().then(() => {
   // config (lazy supabase import), so no separate sync auto-start is needed here.
   bootstrapHiveServices();
   createWindow();
-  // Auto-start the Slack webhook server when configured. Best-effort: a tunnel
-  // failure (offline) is logged, not fatal. The tunnel URL is ephemeral and
-  // changes per restart, so the user re-pastes it via Settings → Start.
-  const slackCfg = readConfig();
-  if (slackCfg.slackEnabled && slackCfg.slackSigningSecret) {
-    void startSlackServer().then((r) => {
-      if (!r.ok) console.error('[slack] auto-start failed:', r.error);
-      else console.log('[slack] webhook listening', r.url ? `(tunnel: ${r.url})` : '(no tunnel)');
-    });
-  }
-  // Auto-start the generic webhook only when the user has explicitly enabled it
-  // AND a secret exists — never a default-on public surface. Opt-in, like Slack.
-  if (slackCfg.webhookEnabled && slackCfg.webhookSecret) {
-    void startWebhookServer().then((r) => {
-      if (!r.ok) console.error('[webhook] auto-start failed:', r.error);
-      else console.log('[webhook] listening', r.url ? `(tunnel: ${r.url})` : '(no tunnel)');
-    });
-  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

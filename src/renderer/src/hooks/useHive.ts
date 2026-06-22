@@ -658,39 +658,6 @@ export function useHive(config: HarnessConfig | null): void {
       return true;
     };
 
-    // Promote a genuine Slack-origin work item to a stamped kanban card the first
-    // time it's dispatched to the office. The card carries slack:{channel,thread_ts}
-    // (origin thread) so the main-process done-observer can post its one summary
-    // reply in-thread once the card later reaches 'done'. ADDITIVE + idempotent +
-    // best-effort: a failure here never affects the dispatch that already happened,
-    // and only dispatched work items land here (slash commands/acks never do).
-    type SlackTaskCard = Parameters<typeof window.cth.hiveWriteTasks>[0][number];
-    const ensureSlackCard = async (m: QueuedMessage): Promise<void> => {
-      const slack = m.slack;
-      if (!slack) return;
-      try {
-        const raw = await window.cth.hiveTasks();
-        const existing: SlackTaskCard[] =
-          raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks)
-            ? (raw as { tasks: SlackTaskCard[] }).tasks
-            : [];
-        const id = `slack-${slack.thread_ts}-${m.id}`;
-        if (existing.some((t) => t.id === id)) return; // already promoted — no dup
-        const title = m.text.length > 80 ? `${m.text.slice(0, 79)}…` : m.text;
-        const card: SlackTaskCard = {
-          id,
-          title,
-          description: m.text,
-          status: 'todo',
-          dependsOn: [],
-          priority: 1,
-          createdAt: new Date().toISOString(),
-          slack
-        };
-        await window.cth.hiveWriteTasks([...existing, card]);
-      } catch { /* best-effort: card promotion must never sink dispatch */ }
-    };
-
     const flush = () => {
       // Drain across ALL teams — a background team's queued messages must still be
       // delivered the moment its agent idles (the PTY is live regardless of view).
@@ -698,8 +665,7 @@ export function useHive(config: HarnessConfig | null): void {
         if (!a.ptyId || a.status !== 'idle') continue;
         const queue = useStore.getState().teams[teamId]?.messageQueues[a.id];
         if (!queue?.length) continue;
-        const head = queue[0];
-        if (dispatch(teamId, a.id, a) && head.slack) void ensureSlackCard(head);
+        dispatch(teamId, a.id, a);
       }
     };
 
@@ -716,32 +682,7 @@ export function useHive(config: HarnessConfig | null): void {
     return () => { unsub(); if (debounce) clearTimeout(debounce); clearInterval(iv); };
   }, [config?.onboardingComplete]);
 
-  // 5) Pipe inbound Slack messages into the orchestrator's queue. The main-process
-  //    Slack webhook server pushes each verified message here via IPC; enqueueing to
-  //    GOD_ID lands it in the orchestrator's queue exactly as if the user had typed it
-  //    into the composer — effect #4 above then drains it to its PTY.
-  //    We immediately ack in the triggering thread and stash the thread coords
-  //    so the hive can post its summary back later.
-  useEffect(() => {
-    if (!config?.onboardingComplete) return;
-    return window.cth.onSlackMessage((msg) => {
-      if (!msg?.text?.trim()) return;
-      const text = msg.text.trim();
-      if (!text) return;
-      const slack = { channel: msg.channel, thread_ts: msg.thread_ts };
-      // Slack/webhook are global singletons routed to ONE primary team (the
-      // default), per architect §7.3 — enqueue to that god, not the active team.
-      useStore.getState().enqueueMessageIn(DEFAULT_TEAM_ID, GOD_ID, text, { slack });
-      // Immediate "queued" acknowledgement in the originating Slack thread.
-      void window.cth.slackReply({
-        channel: msg.channel,
-        thread_ts: msg.thread_ts,
-        text: 'Your request is queued — the Hive team will start working shortly.'
-      });
-    });
-  }, [config?.onboardingComplete]);
-
-  // 5b) Pipe hive tasks addressed to non-Claude agents (e.g. Codex) into their
+  // 5) Pipe hive tasks addressed to non-Claude agents (e.g. Codex) into their
   //     terminal queues. When main routes a message to a non-claude provider it
   //     emits 'hive:enqueueToAgent' instead of bouncing; we enqueue the raw
   //     task text here so effect #4 types it into the REPL when the agent idles.

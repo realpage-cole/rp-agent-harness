@@ -5,6 +5,12 @@ dist/
 .DS_Store
 *.log
 .vite/
+
+# Runtime hive home — coordination data the app writes when the harness home
+# resolves to the repo root (agents/, teams/, board, tasks, logs). Never source.
+/hive/
+/teams/
+
 .env
 .env.local
 .env.signing

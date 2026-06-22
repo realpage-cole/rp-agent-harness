@@ -6,7 +6,6 @@ import { Avatar } from './Avatar';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
-import { AskMeTab } from './AskMeTab';
 import { SchedulesTab } from './SchedulesTab';
 import { disposeTerminal } from './terminalPool';
 import { Icon } from './Icon';
@@ -23,9 +22,9 @@ import { buildSpawnCommand, modelsForProvider, tokenizeCommand, inferAgentProvid
  *  per-agent model + dispatch + assistant access), a memory view, and a live
  *  activity feed / board / usage meter. */
 
-// Both the AskMe (#human) tab and the Schedules (#50) tab live here. The inline
-// SCHEDULES section + its ScheduledMission/relTime helpers moved into SchedulesTab.
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'schedules' | 'memory' | 'graph' | 'activity' | 'handbook';
+// The Schedules (#50) tab lives here. The inline SCHEDULES section + its
+// ScheduledMission/relTime helpers moved into SchedulesTab.
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'schedules' | 'memory' | 'graph' | 'activity' | 'handbook';
 
 /** Fallback denominator for the per-agent token meter when no floor token budget
  *  is configured — so the bar reads as a budget estimate (filled + remaining)
@@ -46,7 +45,6 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
   { key: 'floor', label: 'monitor', icon: 'mcp' },
   { key: 'tasks', label: 'tasks', icon: 'check' },
-  { key: 'human', label: 'ask me', icon: 'bell' },
   { key: 'schedules', label: 'schedules', icon: 'clock' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
   { key: 'graph', label: 'graph', icon: 'web' },
@@ -166,7 +164,6 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
         )}
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
         {tab === 'tasks' && <TasksKanban />}
-        {tab === 'human' && <AskMeTab />}
         {tab === 'schedules' && <SchedulesTab />}
         {tab === 'memory' && (
           <MemoryTab godId={agent.id} who={selectedMemoryAgent ?? undefined} onWho={setSelectedMemoryAgent} />

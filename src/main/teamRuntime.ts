@@ -268,7 +268,7 @@ export class TeamRuntime {
   /** Start every hive-bound background service for this team against its current
    *  home. No-op without a home. Mirrors the old `bootstrapHiveServices`, scoped
    *  to one team. Idempotent on the always-on timers (a re-start can't stack
-   *  duplicates). The global memory/persist/slack/webhook services are owned by
+   *  duplicates). The global memory/persist services are owned by
    *  index.ts, not here. */
   start(): void {
     if (!this.hive.enabled()) return;
@@ -303,8 +303,8 @@ export class TeamRuntime {
   }
 
   /** Tear down every service + timer this team owns. Best-effort — a throw here
-   *  must never abort a quit/reset/changeHome. Globals (memory/persist/slack/
-   *  webhook/ptyManager) are stopped by index.ts. */
+   *  must never abort a quit/reset/changeHome. Globals (memory/persist/
+   *  ptyManager) are stopped by index.ts. */
   stop(): void {
     this.started = false;
     try { this.clearMissionTimers(); } catch (e) { console.error(`[stop:${this.teamId}] clearMissionTimers:`, e); }

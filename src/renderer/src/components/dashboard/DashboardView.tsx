@@ -5,7 +5,6 @@ import { AgentRoster } from './AgentRoster';
 import { ActivityFeed } from './ActivityFeed';
 import { TaskBoard } from './TaskBoard';
 import { NotepadBoard } from './NotepadBoard';
-import { NeedsYouBanner } from './NeedsYouBanner';
 import { HiveViewSelector } from './HiveViewSelector';
 import { TeamSelector } from './TeamSelector';
 import { TeamActionsMenu } from './TeamActionsMenu';
@@ -90,11 +89,8 @@ export function DashboardView() {
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('tasks')}>Tasks</PixelButton>
           <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('schedules')}>Schedules</PixelButton>
-          <PixelButton size="sm" variant="secondary" onClick={() => requestCommandCenterTab('human')}>Needs you</PixelButton>
         </div>
       </div>
-
-      <NeedsYouBanner />
 
       <div style={{
         flex: 1, minHeight: 0,

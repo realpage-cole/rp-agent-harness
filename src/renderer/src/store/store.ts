@@ -90,8 +90,6 @@ export interface QueuedMessage {
   text: string;
   /** epoch ms the message was queued — drives ordering and the "queued 2m ago" hint */
   ts: number;
-  /** Slack-originated: thread coordinates so the hive can reply in-thread. */
-  slack?: { channel: string; thread_ts: string };
 }
 
 export type SidebarTab = 'terminal' | 'files' | 'messages' | 'traces' | 'prompt' | 'config';
@@ -191,7 +189,7 @@ interface State {
   /** Team-scoped enqueue — park a message for an agent in a specific team so the
    *  drain loop delivers it even while that team is in the background. Persists to
    *  the team's namespaced queue store. */
-  enqueueMessageIn: (teamId: string, agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string } }) => void;
+  enqueueMessageIn: (teamId: string, agentId: string, text: string) => void;
   /** Team-scoped queued-message removal (used by the drain loop for any team). */
   removeQueuedMessageIn: (teamId: string, agentId: string, messageId: string) => void;
   agents: Agent[];
@@ -273,7 +271,7 @@ interface State {
   drafts: Record<string, string>;
   setDraft: (agentId: string, text: string) => void;
   /** Park a message for an agent. Returns nothing; the flush loop delivers it. */
-  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string } }) => void;
+  enqueueMessage: (agentId: string, text: string) => void;
   /** Drop a single queued message (user removed it, or it was just delivered). */
   removeQueuedMessage: (agentId: string, messageId: string) => void;
   /** Clear an agent's entire pending queue. */
@@ -637,12 +635,11 @@ export const useStore = create<State>((set) => ({
     useStore.getState().applyToTeam(teamId, (slice) => ({
       toolCounts: { ...slice.toolCounts, [id]: (slice.toolCounts[id] ?? 0) + 1 }
     })),
-  enqueueMessageIn: (teamId, agentId, text, meta) => {
+  enqueueMessageIn: (teamId, agentId, text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const msg: QueuedMessage = {
-      id: newQueuedId(), text: trimmed, ts: Date.now(),
-      ...(meta?.slack ? { slack: meta.slack } : {})
+      id: newQueuedId(), text: trimmed, ts: Date.now()
     };
     useStore.getState().applyToTeam(teamId, (slice) => {
       const messageQueues = { ...slice.messageQueues, [agentId]: [...(slice.messageQueues[agentId] ?? []), msg] };
@@ -772,13 +769,12 @@ export const useStore = create<State>((set) => ({
   drafts: {},
   setDraft: (agentId, text) =>
     set((s) => withActive(s, { drafts: { ...s.drafts, [agentId]: text } })),
-  enqueueMessage: (agentId, text, meta) =>
+  enqueueMessage: (agentId, text) =>
     set((s) => {
       const trimmed = text.trim();
       if (!trimmed) return s;
       const msg: QueuedMessage = {
-        id: newQueuedId(), text: trimmed, ts: Date.now(),
-        ...(meta?.slack ? { slack: meta.slack } : {})
+        id: newQueuedId(), text: trimmed, ts: Date.now()
       };
       const messageQueues = { ...s.messageQueues, [agentId]: [...(s.messageQueues[agentId] ?? []), msg] };
       persistQueues(messageQueues);
