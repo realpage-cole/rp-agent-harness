@@ -28,8 +28,11 @@ export interface TraceEvent {
 
 const MAX_PAYLOAD = 50_000;
 
-/** Anything that resolves an agentId → its working directory (the hive registry). */
-export type CwdResolver = (agentId: string) => string | null;
+/** Resolves an agentId → its working directory plus the optional `claudeHome`
+ *  (CLAUDE_CONFIG_DIR base) under which its transcripts live. Workers share the
+ *  team's `<root>/.agenthome`; the god uses the default `~/.claude` (claudeHome
+ *  omitted). Without this, worker transcripts read from `~/.claude` and miss. */
+export type CwdResolver = (agentId: string) => { cwd: string; claudeHome?: string } | null;
 /** Resolves an agentId → its current Claude session id (from live telemetry), or
  *  null when unknown. The transcript filename IS the session id, so this is what
  *  lets us read the SELECTED agent's session — not whichever was last active. */
@@ -149,8 +152,8 @@ function newestOf(dir: string, files: string[]): string | null {
  *      the newest file as a best-effort — never when a session is known but its
  *      file is absent, since that would surface another agent's transcript.
  */
-function resolveTranscript(cwd: string, sessionId: string | null): string | null {
-  const dir = projectDir(cwd);
+function resolveTranscript(cwd: string, sessionId: string | null, claudeHome?: string): string | null {
+  const dir = projectDir(cwd, claudeHome);
   if (!existsSync(dir)) return null;
   if (sessionId) {
     const exact = join(dir, `${sessionId}.jsonl`);
@@ -181,9 +184,10 @@ export function traceDetails(
   limit = 200
 ): TraceEvent[] {
   try {
-    const cwd = resolveCwd(agentId);
-    if (!cwd) return [];
-    const path = resolveTranscript(cwd, resolveSessionId(agentId));
+    const info = resolveCwd(agentId);
+    if (!info) return [];
+    const { cwd, claudeHome } = info;
+    const path = resolveTranscript(cwd, resolveSessionId(agentId), claudeHome);
     if (!path) return [];
 
     let text: string;
