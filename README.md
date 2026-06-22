@@ -51,7 +51,10 @@ It is local-first by design: everything runs on your machine and works fully off
 
 - **Node.js** and **npm** (Node 22+ recommended; see the Node 24 note under Install).
 - **[Claude Code](https://claude.com/claude-code)** on your `PATH` so agents can run `claude` (the default command). Any other command works too.
-- A **Claude Code enterprise account** — run `claude login` once in your terminal before starting the harness. All agents authenticate via the shared macOS keychain OAuth session; no API key file is needed.
+- A **Claude Code enterprise account**, with the harness **launched from a terminal** (`npm run dev`). The enterprise session lives in the macOS keychain, which only terminal-launched processes can read — a Finder-launched packaged app falls back to API-usage billing. The **god** uses your `~/.claude` (`claude login` once). **Workers** share one logged-in auth home per team at `<root>/.agenthome`; log it in once per team:
+  ```bash
+  CLAUDE_CONFIG_DIR="<harnessHome>/hive/.agenthome" claude   # then /login → your enterprise org
+  ```
 - A **C/C++ toolchain** for the native addons (`node-pty`, `better-sqlite3`). On macOS, install the Xcode Command Line Tools:
   ```bash
   xcode-select --install
@@ -186,8 +189,8 @@ Autonomy comes from a `Stop` hook: when an agent finishes a turn, the hook check
 
 When the main process spawns an agent (`ensureAgent` in `src/main/hive.ts`), it shapes the child's environment:
 
-- **Tool isolation (workers).** Each non-god agent is given its own `CLAUDE_CONFIG_DIR` at `<agentDir>/.cchome`, seeded once with onboarding + workspace-trust accepted and the `oauthAccount` metadata from `~/.claude.json` so it matches the shared macOS keychain entry. This scopes that agent's MCP servers, plugins, and Claude Code session state to itself rather than inheriting from your global `~/.claude`. The **god** orchestrator intentionally keeps the shared home for full access.
-- **Auth.** All agents authenticate via the enterprise `claude login` OAuth session. The OAuth token lives in the macOS keychain (service `"Claude Code"`) and is accessible to all processes running as the same OS user — no token copy is needed. If you have not run `claude login`, the harness will surface a clear error before spawning.
+- **Auth (shared home per team).** A fresh `CLAUDE_CONFIG_DIR` can't reach the keychain's enterprise OAuth session, so all of a team's workers share ONE logged-in auth home at `<root>/.agenthome` (a one-time `claude /login` there). Every worker then bills the enterprise seat, like the god (which uses `~/.claude`). The harness refuses to spawn with a clear message if the relevant home isn't logged in.
+- **Tool isolation (workers).** Isolation is decoupled from auth and applied per spawn via flags: MCP servers come from a per-agent `<agentDir>/mcp.json` passed as `--mcp-config … --strict-mcp-config` (so the agent sees only its servers, not the shared home's), and plugins are gated by `enabledPlugins` in the per-agent `--settings` file (the shared home holds the union of all agents' plugins, installed by `hive/bin/provision_agent_tools.py`). Server defs + per-agent assignments live in `<root>/agent-tooling.json`. The **god** keeps the shared `~/.claude` for full access.
 
 ### Memory
 
