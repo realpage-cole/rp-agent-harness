@@ -22,7 +22,7 @@
  * CONSTRUCTION. Downstream durable stores (Lane A's cost-ledger, Lane B's
  * SQLite) inherit that guarantee and must never persist a raw record either.
  *
- * Transport posture mirrors `slack.ts`: the local handler bound to 127.0.0.1 is
+ * Transport posture: the local handler bound to 127.0.0.1 is
  * the security boundary. Runs in the Electron main process; deliberately free of
  * any `electron` import so it can be smoke-tested as a plain Node module.
  */
@@ -231,7 +231,7 @@ export class TelemetryCollector {
     return { usage, spans };
   }
 
-  // ─── HTTP plumbing (mirrors slack.ts) ──────────────────────────────────────
+  // ─── HTTP plumbing ─────────────────────────────────────────────────────────
 
   private listen(): Promise<void> {
     return new Promise<void>((resolve, reject) => {

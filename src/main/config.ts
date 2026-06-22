@@ -190,25 +190,6 @@ export interface HarnessConfig {
    *  ("theme" key) at spawn so the TUI's truecolor palette matches. Scoped to
    *  harness agents only; the user's global Claude theme is never touched. */
   terminalTheme?: 'light' | 'dark';
-  /** Master toggle for the Slack → orchestrator's-queue integration. */
-  slackEnabled?: boolean;
-  /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */
-  slackSigningSecret?: string;
-  /** Bot token (xoxb-…) — only needed if the bot ever replies; optional for now. */
-  slackBotToken?: string;
-  /** Restrict ingestion to one channel id; empty/undefined = any channel. */
-  slackChannelId?: string;
-  /** Local HTTP port the webhook server binds to (default 3847). */
-  slackPort?: number;
-
-  // ─── Generic inbound webhook + status API ──────────────────────────────────
-  /** Master toggle for the generic webhook HTTP API (POST → work, GET → status). */
-  webhookEnabled?: boolean;
-  /** App-generated shared secret callers echo in `x-md-webhook-secret`. Never
-   *  logged, and never forwarded into the routed message/card/response. */
-  webhookSecret?: string;
-  /** Local HTTP port the generic webhook server binds to (default 3849). */
-  webhookPort?: number;
 
   // ─── Supabase collaborative sync (Phase 0/1: append-only mirror) ───────────
   /** Master toggle for Supabase sync. Off by default — the app is fully local
@@ -255,14 +236,6 @@ const DEFAULTS: HarnessConfig = {
   semanticMemory: true,
   missions: [OPS_STANDUP_MISSION],
   notifications: false,
-  slackEnabled: false,
-  slackSigningSecret: undefined,
-  slackBotToken: undefined,
-  slackChannelId: undefined,
-  slackPort: undefined,
-  webhookEnabled: false,
-  webhookSecret: undefined,
-  webhookPort: undefined,
   syncEnabled: false,
   supabaseUrl: undefined,
   supabaseAnonKey: undefined,

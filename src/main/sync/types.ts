@@ -5,8 +5,8 @@
  * the pure IO helpers (io.ts) can all share one contract without import cycles.
  *
  * Lives in the Electron MAIN process and is deliberately free of any `electron`
- * import — these are plain Node types so the module can be unit-/smoke-tested
- * (matching slack.ts). See sync/index.ts for the orchestration narrative.
+ * import — these are plain Node types so the module can be unit-/smoke-tested.
+ * See sync/index.ts for the orchestration narrative.
  */
 import type { CommandHistoryRow } from '../db';
 

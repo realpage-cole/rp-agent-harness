@@ -20,8 +20,8 @@
  *
  * Lives in the Electron MAIN process (the renderer CSP blocks supabase.co/wss and
  * the workspace key must stay out of the renderer). Deliberately free of any
- * `electron` import so it can be unit-/smoke-tested as a plain Node module —
- * matching slack.ts. The Supabase client is loaded via dynamic import() so the
+ * `electron` import so it can be unit-/smoke-tested as a plain Node module.
+ * The Supabase client is loaded via dynamic import() so the
  * app still boots (sync just stays inactive) when the dep isn't installed yet.
  */
 import { join } from 'node:path';
@@ -68,7 +68,7 @@ export type { MemoryChunkHit } from './memory';
 
 /** Optional hooks the manager calls when a pull lands new mirror memory: ask the
  *  MemoryManager to re-mine, and push a fresh status to the renderer. Mirrors the
- *  emit/callback wiring used by slack/telemetry.
+ *  emit/callback wiring used by telemetry.
  *
  *  `hive` (Phase 3) is the seam to the hive's shared state (registry/tasks/board):
  *  when present, the manager also push/pull/subscribes that state. index.ts builds
@@ -249,7 +249,7 @@ export class SyncManager {
     return this.store.getKv<{ access_token?: string }>(K_AUTH_SESSION)?.access_token ?? '';
   }
 
-  // ─── lifecycle (mirrors startSlackServer/stopSlackServer) ────────────────────
+  // ─── lifecycle ───────────────────────────────────────────────────────────────
 
   /** Bring sync up if enabled + configured. Lazily imports supabase-js so a
    *  missing dependency just leaves sync inactive instead of crashing boot.

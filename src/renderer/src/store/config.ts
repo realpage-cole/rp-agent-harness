@@ -54,11 +54,6 @@ export interface HarnessConfig {
   opsStandupSeeded?: boolean;
   heartbeatSeeded?: boolean;
   notifications?: boolean;
-  slackEnabled?: boolean;
-  slackSigningSecret?: string;
-  slackBotToken?: string;
-  slackChannelId?: string;
-  slackPort?: number;
   /** Master toggle for Supabase collaborative sync (off by default). */
   syncEnabled?: boolean;
   /** Supabase project URL, e.g. https://xxxx.supabase.co. */
