@@ -1110,9 +1110,16 @@ ipcMain.handle('hive:updateAgentMeta', (_evt, id: unknown, patch: unknown, teamI
 ipcMain.handle('hive:traceDetails', (_evt, agentId: unknown, limit: unknown, teamId?: unknown) => {
   if (typeof agentId !== 'string') return [];
   const r = rt(teamId);
+  const root = r.hive.root();
   return traceDetails(
     agentId,
-    (id) => r.hive.registry().agents[id]?.cwd ?? null,
+    (id) => {
+      const agent = r.hive.registry().agents[id];
+      if (!agent) return null;
+      // Workers share <root>/.agenthome; the god uses ~/.claude (claudeHome omitted).
+      const claudeHome = !agent.isGod && root ? join(root, '.agenthome') : undefined;
+      return { cwd: agent.cwd, claudeHome };
+    },
     (id) => r.telemetry.getAgentSessionId(id),
     typeof limit === 'number' ? limit : 200
   );
